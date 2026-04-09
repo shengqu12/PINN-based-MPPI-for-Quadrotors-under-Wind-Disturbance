@@ -1,11 +1,11 @@
 """
-plot_trajectories.py — 3D 轨迹跟踪可视化
+plot_trajectories.py — 3D Trajectory Tracking Visualization
 
-修复：
-    1. 8字形轨迹从原点出发（phi=0）
-    2. Hover 固定轴范围，避免数值噪声
-    3. 加入 slanted circle（倾斜圆）
-    4. 每个子图统一视角
+Fixes:
+    1. Figure-eight trajectory starts from origin (phi=0)
+    2. Hover fixed axis range to avoid numerical noise
+    3. Added slanted circle trajectory
+    4. Unified perspective for each subplot
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ import os, sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from models.pinn import ResidualPINN
 from training.dataset import Normalizer
-from controllers.pinn_mppi_cpu import (MPPIController, pinn_predict,
+from controllers.pinn_mppi_GPU import (MPPIController, pinn_predict,
                                     load_pinn_model, EMA_ALPHA, DP_CALC_MAX)
 
 from rotorpy.vehicles.hummingbird_params import quad_params
@@ -33,13 +33,13 @@ HOVER_OMEGA = float(np.sqrt(MASS * G / (4 * K_ETA)))
 KP_POS      = np.array([6.5, 6.5, 15.0])
 
 
-# ── 轨迹定义 ─────────────────────────────────────────────────────────
+# ── Trajectory Definitions ─────────────────────────────────────────────────────────
 
 class FigureEightTraj:
     """
-    8字形轨迹（Lissajous），从原点出发：
+    Figure-eight trajectory (Lissajous), starting from origin:
         x(t) = Ax × sin(ωt)
-        y(t) = Ay × sin(2ωt)     phi=0 → 从 (0,0) 出发
+        y(t) = Ay × sin(2ωt)     phi=0 → starts from (0,0)
     """
     def __init__(self, center=np.array([0.,0.,1.5]),
                  Ax=1.5, Ay=0.75, freq_x=0.15):
@@ -64,11 +64,11 @@ class FigureEightTraj:
 
 class SlantedCircleTraj:
     """
-    倾斜圆轨迹（对标 Minarik Fig.5c slanted circle）：
+    Slanted circle trajectory (reference: Minarik Fig.5c slanted circle):
         x(t) = R × cos(ωt)
         y(t) = R × sin(ωt) × cos(θ)
         z(t) = z0 + R × sin(ωt) × sin(θ)
-    θ=30° → 轻微倾斜，z 轴有周期性变化
+    θ=30° → slight tilt, periodic variations in z-axis
     """
     def __init__(self, center=np.array([0.,0.,1.5]),
                  R=1.5, freq=0.2, tilt_deg=30.0):
@@ -95,16 +95,16 @@ class SlantedCircleTraj:
         }
 
 
-# ── 仿真 ─────────────────────────────────────────────────────────────
+# ── Simulation ─────────────────────────────────────────────────────────────
 
 def simulate(model, normalizer, wind_vec, trajectory_fn,
              use_pinn=True, sim_time=15.0, dt=0.01, K=1000, H=20):
-    # 从轨迹 t=0 的位置出发，避免追赶阶段
+    # Start from the trajectory position at t=0 to avoid the catch-up phase
     _traj_init = trajectory_fn()
     start_pos  = _traj_init.update(0.0)["x"].copy()
 
     state = {
-        "x":            start_pos,          # 从轨迹起点出发
+        "x":            start_pos,          # Start at trajectory origin
         "v":            np.zeros(3),
         "q":            np.array([0.,0.,0.,1.]),
         "w":            np.zeros(3),
@@ -153,7 +153,7 @@ def simulate(model, normalizer, wind_vec, trajectory_fn,
     return positions, ref_pos
 
 
-# ── 绘图工具 ─────────────────────────────────────────────────────────
+# ── Plotting Tools ─────────────────────────────────────────────────────────
 
 def plot_traj(ax, ref, actual, color, label,
               xlim=None, ylim=None, zlim=None,
@@ -173,7 +173,7 @@ def plot_traj(ax, ref, actual, color, label,
     ax.view_init(elev=elev, azim=azim)
     ax.grid(True, alpha=0.15)
 
-    # 固定轴范围（避免数值噪声导致轴失控）
+    # Fixed axis limits (to avoid axis scaling issues due to numerical noise)
     if xlim: ax.set_xlim(xlim)
     if ylim: ax.set_ylim(ylim)
     if zlim: ax.set_zlim(zlim)
@@ -211,7 +211,7 @@ def main():
         'eight':   'eight',
     }
 
-    # 每种轨迹的轴范围
+    # Axis limits for each trajectory type
     axis_limits = {
         'hover':   dict(xlim=[-0.5,0.8], ylim=[-0.3,0.3], zlim=[0.5,2.5]),
         'circle':  dict(xlim=[-2.0,2.5], ylim=[-2.0,2.0], zlim=[0.5,2.5]),
@@ -219,8 +219,8 @@ def main():
         'eight':   dict(xlim=[-2.0,2.5], ylim=[-1.5,1.5], zlim=[0.5,2.5]),
     }
 
-    # ── Figure 1：Nominal MPPI vs PINN-MPPI（2行×4列）───────────────
-    print("生成 Figure 1：Nominal vs PINN-MPPI（4种轨迹）...")
+    # ── Figure 1: Nominal MPPI vs PINN-MPPI (2 rows × 4 columns) ───────────────
+    print("Generating Figure 1: Nominal vs PINN-MPPI (4 trajectories)...")
     fig1, axes1 = plt.subplots(
         2, 4, figsize=(18, 8),
         subplot_kw={'projection': '3d'}
@@ -252,10 +252,10 @@ def main():
     plt.tight_layout()
     p1 = os.path.join(RESULT_DIR, 'traj_comparison.png')
     fig1.savefig(p1, dpi=150, bbox_inches='tight')
-    print(f"Figure 1 已保存: {p1}")
+    print(f"Figure 1 saved: {p1}")
 
-    # ── Figure 2：不同风速下 circle 轨迹（PINN-MPPI）────────────────
-    print("\n生成 Figure 2：不同风速...")
+    # ── Figure 2: Circle trajectory under different wind speeds (PINN-MPPI) ────────────────
+    print("\nGenerating Figure 2: Wind sweep...")
     wind_list = [
         (np.array([0.,0.,0.]),  'wind=0'),
         (np.array([4.,0.,0.]),  'wind=4 m/s'),
@@ -277,7 +277,7 @@ def main():
         print(f"  {wlabel}...")
         pos, ref = simulate(model, normalizer, wv,
                             trajs['circle'], use_pinn=True, sim_time=15.)
-        # X 轴范围随风速扩大
+        # X-axis range expands with wind speed
         xmax = 2.0 + float(np.linalg.norm(wv)) * 0.1
         ax = axes2[col]
         plot_traj(ax, ref, pos, '#E87B2D', 'PINN-MPPI',
@@ -287,10 +287,10 @@ def main():
     plt.tight_layout()
     p2 = os.path.join(RESULT_DIR, 'traj_wind_sweep.png')
     fig2.savefig(p2, dpi=150, bbox_inches='tight')
-    print(f"Figure 2 已保存: {p2}")
+    print(f"Figure 2 saved: {p2}")
 
-    # ── Figure 3：四控制器对比（circle，wind=8）───────────────────────
-    print("\n生成 Figure 3：四控制器对比...")
+    # ── Figure 3: Four-controller comparison (circle, wind=8) ───────────────────────
+    print("\nGenerating Figure 3: Controller comparison...")
 
     def se3_only_sim(wind_vec, traj_fn, sim_time=15., dt=0.01):
         _ti = traj_fn(); sp = _ti.update(0.0)["x"].copy()
@@ -354,7 +354,7 @@ def main():
     pos_pinn_c, _  = simulate(model, normalizer, wind8, trajs['circle'],
                                use_pinn=True)
 
-    # 左：SE3 vs Oracle
+    # Left: SE3 vs Oracle
     ax = axes3[0]
     ax.plot(ref_c[:,0], ref_c[:,1], ref_c[:,2],
             color='#7EC8E3', linestyle='--', linewidth=1., alpha=0.7,
@@ -370,7 +370,7 @@ def main():
     ax.set_xlim(lims_c['xlim']); ax.set_ylim(lims_c['ylim'])
     ax.set_zlim(lims_c['zlim'])
 
-    # 右：Nominal vs PINN-MPPI
+    # Right: Nominal vs PINN-MPPI
     ax = axes3[1]
     ax.plot(ref_c[:,0], ref_c[:,1], ref_c[:,2],
             color='#7EC8E3', linestyle='--', linewidth=1., alpha=0.7,
@@ -389,9 +389,9 @@ def main():
     plt.tight_layout()
     p3 = os.path.join(RESULT_DIR, 'traj_controller_compare.png')
     fig3.savefig(p3, dpi=150, bbox_inches='tight')
-    print(f"Figure 3 已保存: {p3}")
+    print(f"Figure 3 saved: {p3}")
 
-    print(f"\n全部完成！\n  {p1}\n  {p2}\n  {p3}")
+    print(f"\nAll tasks complete!\n  {p1}\n  {p2}\n  {p3}")
 
 
 if __name__ == '__main__':
