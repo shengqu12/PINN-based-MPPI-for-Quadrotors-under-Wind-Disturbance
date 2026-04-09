@@ -1,0 +1,157 @@
+<!--
+hummingbird.xml — Hummingbird 四旋翼 MuJoCo 模型（真实外观版）
+
+X 型机架，碳纤维臂，电机座，旋翼圆盘
+物理参数与 RotorPy 一致：
+    mass=0.5kg, Ixx=0.00365, Iyy=0.00368, Izz=0.00703
+    k_eta=5.57e-6, k_m=1.36e-7, arm=0.1202m
+-->
+
+<mujoco model="hummingbird">
+
+  <compiler angle="radian" autolimits="true"/>
+
+  <option gravity="0 0 -9.81" timestep="0.001" integrator="RK4"/>
+
+  <asset>
+    <material name="carbon"    rgba="0.08 0.08 0.08 1"/>
+    <material name="body_mat"  rgba="0.12 0.12 0.15 1"/>
+    <material name="motor_mat" rgba="0.20 0.20 0.22 1"/>
+    <material name="prop_cw"   rgba="0.85 0.15 0.10 0.75"/>
+    <material name="prop_ccw"  rgba="0.10 0.70 0.20 0.75"/>
+    <material name="led_red"   rgba="1.0  0.1  0.1  1"/>
+    <material name="led_green" rgba="0.1  1.0  0.1  1"/>
+    <texture type="skybox" file="asset/desert.png" gridsize="3 4" gridlayout=".U..LFRB.D.." />
+    <texture name="plane" type="2d" builtin="checker" rgb1=".1 .1 .1" rgb2=".9 .9 .9" width="512" height="512" mark="cross" markrgb=".8 .8 .8" />
+    <material name="plane" reflectance="0.3" texture="plane" texrepeat="1 1" texuniform="true" />
+  </asset>
+
+  <default>
+    <joint damping="0.0005"/>
+  </default>
+
+  <worldbody>
+
+    <body name="quadrotor" pos="0 0 1.5">
+      <freejoint name="root"/>
+
+      <!-- ── 机体中心（扁平六边形近似） ── -->
+      <geom name="body_center" type="cylinder"
+            size="0.055 0.018"
+            mass="0.328"
+            material="body_mat"/>
+
+      <!-- 顶盖（薄圆盘，深色） -->
+      <geom name="body_top" type="cylinder"
+            size="0.050 0.004" pos="0 0 0.020"
+            mass="0.01"
+            material="carbon"/>
+
+      <!-- ── 4 根碳纤维臂（X 型，45°布局）── -->
+      <!-- M1 右前 (+x+y) -->
+      <geom name="arm1" type="capsule" size="0.006"
+            fromto="0 0 0  0.1202 0.1202 0"
+            mass="0.012" material="carbon"/>
+      <!-- M2 右后 (+x-y) -->
+      <geom name="arm2" type="capsule" size="0.006"
+            fromto="0 0 0  0.1202 -0.1202 0"
+            mass="0.012" material="carbon"/>
+      <!-- M3 左后 (-x-y) -->
+      <geom name="arm3" type="capsule" size="0.006"
+            fromto="0 0 0  -0.1202 -0.1202 0"
+            mass="0.012" material="carbon"/>
+      <!-- M4 左前 (-x+y) -->
+      <geom name="arm4" type="capsule" size="0.006"
+            fromto="0 0 0  -0.1202 0.1202 0"
+            mass="0.012" material="carbon"/>
+
+      <!-- ── 4 个电机座 ── -->
+      <geom name="motor1" type="cylinder" size="0.014 0.012"
+            pos="0.1202  0.1202 0.006"
+            mass="0.015" material="motor_mat"/>
+      <geom name="motor2" type="cylinder" size="0.014 0.012"
+            pos="0.1202 -0.1202 0.006"
+            mass="0.015" material="motor_mat"/>
+      <geom name="motor3" type="cylinder" size="0.014 0.012"
+            pos="-0.1202 -0.1202 0.006"
+            mass="0.015" material="motor_mat"/>
+      <geom name="motor4" type="cylinder" size="0.014 0.012"
+            pos="-0.1202  0.1202 0.006"
+            mass="0.015" material="motor_mat"/>
+
+      <!-- ── 4 个旋翼圆盘（CW红色，CCW绿色）── -->
+      <!-- M1 顺时针(CW) 红色 -->
+      <geom name="rotor1" type="cylinder" size="0.095 0.003"
+            pos="0.1202  0.1202 0.016"
+            mass="0.008" material="prop_cw"/>
+      <!-- M2 逆时针(CCW) 绿色 -->
+      <geom name="rotor2" type="cylinder" size="0.095 0.003"
+            pos="0.1202 -0.1202 0.016"
+            mass="0.008" material="prop_ccw"/>
+      <!-- M3 顺时针(CW) 红色 -->
+      <geom name="rotor3" type="cylinder" size="0.095 0.003"
+            pos="-0.1202 -0.1202 0.016"
+            mass="0.008" material="prop_cw"/>
+      <!-- M4 逆时针(CCW) 绿色 -->
+      <geom name="rotor4" type="cylinder" size="0.095 0.003"
+            pos="-0.1202  0.1202 0.016"
+            mass="0.008" material="prop_ccw"/>
+
+      <!-- ── 起落架（4根细支柱）── -->
+      <geom name="leg1" type="capsule" size="0.004"
+            fromto="0.06  0.06 -0.018   0.06  0.06 -0.045"
+            mass="0.003" material="carbon"/>
+      <geom name="leg2" type="capsule" size="0.004"
+            fromto="0.06 -0.06 -0.018   0.06 -0.06 -0.045"
+            mass="0.003" material="carbon"/>
+      <geom name="leg3" type="capsule" size="0.004"
+            fromto="-0.06 -0.06 -0.018  -0.06 -0.06 -0.045"
+            mass="0.003" material="carbon"/>
+      <geom name="leg4" type="capsule" size="0.004"
+            fromto="-0.06  0.06 -0.018  -0.06  0.06 -0.045"
+            mass="0.003" material="carbon"/>
+      <!-- 起落架横杆 -->
+      <geom name="skid1" type="capsule" size="0.004"
+            fromto="0.06 -0.06 -0.045   0.06  0.06 -0.045"
+            mass="0.002" material="carbon"/>
+      <geom name="skid2" type="capsule" size="0.004"
+            fromto="-0.06 -0.06 -0.045  -0.06  0.06 -0.045"
+            mass="0.002" material="carbon"/>
+      <geom name="skid3" type="capsule" size="0.004"
+            fromto="0.06  0.06 -0.045  -0.06  0.06 -0.045"
+            mass="0.002" material="carbon"/>
+      <geom name="skid4" type="capsule" size="0.004"
+            fromto="0.06 -0.06 -0.045  -0.06 -0.06 -0.045"
+            mass="0.002" material="carbon"/>
+
+      <!-- ── LED 指示灯（前红后绿，方便判断朝向）── -->
+      <geom name="led_front" type="sphere" size="0.008"
+            pos="0.055 0 0.020"
+            mass="0.001" material="led_red"/>
+      <geom name="led_back" type="sphere" size="0.008"
+            pos="-0.055 0 0.020"
+            mass="0.001" material="led_green"/>
+
+      <!-- IMU 位置 -->
+      <site name="imu" pos="0 0 0" size="0.005"/>
+
+    </body>
+
+    <!-- 地面 -->
+    <geom name="floor" type="plane" material="plane" size="30 30 0.1"
+          pos="0 0 0" rgba="0.75 0.75 0.75 1"
+          friction="0.5 0.1 0.1"/>
+
+  </worldbody>
+
+  <sensor>
+    <framepos    name="pos"   objtype="body" objname="quadrotor"/>
+    <framequat   name="quat"  objtype="body" objname="quadrotor"/>
+    <framelinvel name="vel"   objtype="body" objname="quadrotor"/>
+    <frameangvel name="omega" objtype="body" objname="quadrotor"
+                 reftype="body" refname="quadrotor"/>
+    <accelerometer name="accel" site="imu"/>
+    <gyro          name="gyro"  site="imu"/>
+  </sensor>
+
+</mujoco>
