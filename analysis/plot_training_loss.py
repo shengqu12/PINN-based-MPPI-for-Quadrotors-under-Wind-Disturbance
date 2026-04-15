@@ -50,6 +50,7 @@ fig.suptitle('PINN Training Curves (ResidualPINN, L_reg + λ·L_sym)',
              fontsize=13, y=1.01)
 
 # ── Plot 1: Loss + lambda schedule ───────────────────────────────────────────
+
 ax = axes[0, 0]
 ax.plot(df['epoch'], df['train_loss'], color=C_LOSS, lw=1.5, label='Train loss')
 ax.set_xlabel('Epoch')

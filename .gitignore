@@ -1,1 +1,6 @@
 simulation/mujoco_menagerie
+
+ablation_29k_run.log
+ablation_const_lam.log
+
+.claude
