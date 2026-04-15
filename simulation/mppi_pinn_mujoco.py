@@ -1,5 +1,5 @@
 """
-mppi_pinn_mujoco.py — MuJoCo PINN-MPPI 完整可视化
+mppi_pinn_mujoco.py — MuJoCo PINN-MPPI full visualization
 
 
     python simulation/mppi_pinn_mujoco.py --render --traj circle --wind 8

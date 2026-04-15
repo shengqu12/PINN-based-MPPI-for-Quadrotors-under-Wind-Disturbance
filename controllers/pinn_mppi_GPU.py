@@ -189,7 +189,7 @@ def pinn_predict(model, normalizer, state, motor_speeds,
         return model(X_norm, vr_t).squeeze(0).cpu().numpy()
 
 
-# ── MPPI controller（CUDA Graph acceleration）────────────────────────────────────
+# ── MPPI controller (CUDA Graph acceleration) ────────────────────────────────────
 
 class MPPIController:
     """
@@ -241,7 +241,7 @@ class MPPIController:
         self._graph         = None   
         self._graph_ready   = False
 
-        # static tensor（CUDA Graph ）
+        # static tensors (for CUDA Graph)
         self._st = {}
 
     def update_ema(self, residual):
@@ -394,7 +394,7 @@ class MPPIController:
         else:
             res_const = torch.zeros(self.K, 3, device=dev)
 
-        # Rollout（CUDA Graph or CPU fallback）
+        # Rollout (CUDA Graph or CPU fallback)
         if dev.type == 'cuda':
             if not self._graph_ready:
                 self._setup_graph()
@@ -636,7 +636,7 @@ def main():
         import matplotlib; matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         fig, axes = plt.subplots(2, 3, figsize=(16, 8))
-        fig.suptitle('PINN-MPPI（K=896, H=15)', fontsize=10)
+        fig.suptitle('PINN-MPPI (K=896, H=15)', fontsize=10)
 
         for row, (traj_name, results) in enumerate(all_results.items()):
             ws_list = sorted(results.keys())

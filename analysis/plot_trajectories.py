@@ -15,8 +15,8 @@ import os, sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from models.pinn import ResidualPINN
 from training.dataset import Normalizer
-from controllers.pinn_mppi_cpu import (MPPIController, pinn_predict,
-                                    load_pinn_model, EMA_ALPHA, DP_CALC_MAX)
+from controllers.pinn_mppi_GPU import (MPPIController, pinn_predict,
+                                      load_pinn_model, EMA_ALPHA, DP_CALC_MAX)
 
 from rotorpy.vehicles.hummingbird_params import quad_params
 from rotorpy.vehicles.multirotor import Multirotor

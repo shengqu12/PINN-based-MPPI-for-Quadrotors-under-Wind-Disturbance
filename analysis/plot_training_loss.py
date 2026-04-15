@@ -1,398 +1,161 @@
 """
-plot_trajectories.py — 3D Trajectory Tracking Visualization
+plot_training_loss.py — Training Process Visualization
 
-Fixes:
-    1. Figure-eight trajectory starts from origin (phi=0)
-    2. Hover fixed axis range to avoid numerical noise
-    3. Added slanted circle trajectory
-    4. Unified perspective for each subplot
+Reads checkpoints/train_log.csv and generates 4 plots:
+    1. Training loss + lambda_sym schedule (dual y-axis)
+    2. Validation RMSE per axis (X/Y/Z)
+    3. OOD RMSE per axis (X/Y/Z)
+    4. Val vs OOD mean RMSE comparison
+
+CSV columns expected:
+    epoch, train_loss, lambda_sym,
+    val_rmse_x, val_rmse_y, val_rmse_z,
+    ood_rmse_x, ood_rmse_y, ood_rmse_z
+
+Run:
+    python analysis/plot_training_loss.py
 """
 
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import numpy as np
-import torch
-import os, sys
+import os
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from models.pinn import ResidualPINN
-from training.dataset import Normalizer
-from controllers.pinn_mppi_GPU import (MPPIController, pinn_predict,
-                                    load_pinn_model, EMA_ALPHA, DP_CALC_MAX)
-
-from rotorpy.vehicles.hummingbird_params import quad_params
-from rotorpy.vehicles.multirotor import Multirotor
-from rotorpy.controllers.quadrotor_control import SE3Control
-from rotorpy.trajectories.circular_traj import ThreeDCircularTraj
-from rotorpy.trajectories.hover_traj import HoverTraj
-
-CKPT_DIR   = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
+# ── Paths ─────────────────────────────────────────────────────────────────────
+LOG_PATH   = os.path.join(os.path.dirname(__file__), '..', 'checkpoints', 'train_log.csv')
 RESULT_DIR = os.path.join(os.path.dirname(__file__), '..', 'results')
-K_ETA       = quad_params['k_eta']
-MASS        = quad_params['mass']
-G           = 9.81
-HOVER_OMEGA = float(np.sqrt(MASS * G / (4 * K_ETA)))
-KP_POS      = np.array([6.5, 6.5, 15.0])
+os.makedirs(RESULT_DIR, exist_ok=True)
 
+# ── Load ──────────────────────────────────────────────────────────────────────
+df = pd.read_csv(LOG_PATH)
+print(f"Read training log: {len(df)} epochs")
+print(f"Columns: {df.columns.tolist()}")
 
-# ── Trajectory Definitions ─────────────────────────────────────────────────────────
+val_mean = (df['val_rmse_x'] + df['val_rmse_y'] + df['val_rmse_z']) / 3
+ood_mean = (df['ood_rmse_x'] + df['ood_rmse_y'] + df['ood_rmse_z']) / 3
 
-class FigureEightTraj:
-    """
-    Figure-eight trajectory (Lissajous), starting from origin:
-        x(t) = Ax × sin(ωt)
-        y(t) = Ay × sin(2ωt)     phi=0 → starts from (0,0)
-    """
-    def __init__(self, center=np.array([0.,0.,1.5]),
-                 Ax=1.5, Ay=0.75, freq_x=0.15):
-        self.cx,self.cy,self.cz = center
-        self.Ax=Ax; self.Ay=Ay
-        self.wx=2*np.pi*freq_x
-        self.wy=2*self.wx
+# ── Colors ────────────────────────────────────────────────────────────────────
+C_LOSS = '#2c3e50'
+C_LAM  = '#3498db'
+C_X    = '#e74c3c'
+C_Y    = '#3498db'
+C_Z    = '#f39c12'
+C_VAL  = '#8e44ad'
+C_OOD  = '#e74c3c'
 
-    def update(self, t):
-        x  = self.cx + self.Ax * np.sin(self.wx * t)
-        y  = self.cy + self.Ay * np.sin(self.wy * t)
-        vx = self.Ax * self.wx * np.cos(self.wx * t)
-        vy = self.Ay * self.wy * np.cos(self.wy * t)
-        ax = -self.Ax * self.wx**2 * np.sin(self.wx * t)
-        ay = -self.Ay * self.wy**2 * np.sin(self.wy * t)
-        return {
-            'x':np.array([x,y,self.cz]), 'x_dot':np.array([vx,vy,0.]),
-            'x_ddot':np.array([ax,ay,0.]),'x_dddot':np.zeros(3),
-            'x_ddddot':np.zeros(3),'yaw':0.,'yaw_dot':0.
-        }
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+fig.suptitle('PINN Training Curves (ResidualPINN, L_reg + λ·L_sym)',
+             fontsize=13, y=1.01)
 
+# ── Plot 1: Loss + lambda schedule ───────────────────────────────────────────
+ax = axes[0, 0]
+ax.plot(df['epoch'], df['train_loss'], color=C_LOSS, lw=1.5, label='Train loss')
+ax.set_xlabel('Epoch')
+ax.set_ylabel('Loss (log scale)', color=C_LOSS)
+ax.set_yscale('log')
+ax.tick_params(axis='y', labelcolor=C_LOSS)
+ax.grid(True, alpha=0.3)
+ax.set_title('Training Loss & λ_sym Schedule')
 
-class SlantedCircleTraj:
-    """
-    Slanted circle trajectory (reference: Minarik Fig.5c slanted circle):
-        x(t) = R × cos(ωt)
-        y(t) = R × sin(ωt) × cos(θ)
-        z(t) = z0 + R × sin(ωt) × sin(θ)
-    θ=30° → slight tilt, periodic variations in z-axis
-    """
-    def __init__(self, center=np.array([0.,0.,1.5]),
-                 R=1.5, freq=0.2, tilt_deg=30.0):
-        self.cx,self.cy,self.cz = center
-        self.R   = R
-        self.w   = 2*np.pi*freq
-        self.ct  = np.cos(np.radians(tilt_deg))
-        self.st  = np.sin(np.radians(tilt_deg))
+# lambda_sym on right y-axis (if column exists)
+if 'lambda_sym' in df.columns:
+    ax2 = ax.twinx()
+    ax2.plot(df['epoch'], df['lambda_sym'], color=C_LAM, lw=1.2,
+             linestyle='--', alpha=0.7, label='λ_sym')
+    ax2.set_ylabel('λ_sym', color=C_LAM)
+    ax2.tick_params(axis='y', labelcolor=C_LAM)
+    ax2.set_ylim(bottom=0)
+    lines1, labels1 = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labels1 + labels2, fontsize=9)
+else:
+    ax.legend(fontsize=9)
 
-    def update(self, t):
-        x  = self.cx + self.R * np.cos(self.w * t)
-        y  = self.cy + self.R * np.sin(self.w * t) * self.ct
-        z  = self.cz + self.R * np.sin(self.w * t) * self.st
-        vx = -self.R * self.w * np.sin(self.w * t)
-        vy =  self.R * self.w * np.cos(self.w * t) * self.ct
-        vz =  self.R * self.w * np.cos(self.w * t) * self.st
-        ax = -self.R * self.w**2 * np.cos(self.w * t)
-        ay = -self.R * self.w**2 * np.sin(self.w * t) * self.ct
-        az = -self.R * self.w**2 * np.sin(self.w * t) * self.st
-        return {
-            'x':np.array([x,y,z]), 'x_dot':np.array([vx,vy,vz]),
-            'x_ddot':np.array([ax,ay,az]),'x_dddot':np.zeros(3),
-            'x_ddddot':np.zeros(3),'yaw':0.,'yaw_dot':0.
-        }
+# ── Plot 2: Validation RMSE per axis ─────────────────────────────────────────
+ax = axes[0, 1]
+ax.plot(df['epoch'], df['val_rmse_x'], color=C_X, lw=1.2, label='Val X')
+ax.plot(df['epoch'], df['val_rmse_y'], color=C_Y, lw=1.2, label='Val Y')
+ax.plot(df['epoch'], df['val_rmse_z'], color=C_Z, lw=1.5, label='Val Z', linestyle='--')
+ax.plot(df['epoch'], val_mean, color='black', lw=1.5, label='Val mean', linestyle=':')
 
+best_ep  = df.loc[val_mean.idxmin(), 'epoch']
+best_val = val_mean.min()
+ax.scatter([best_ep], [best_val], color='black', zorder=5, s=40)
+ax.text(best_ep + 2, best_val, f'ep{int(best_ep)}\n{best_val:.4f}', fontsize=8)
 
-# ── Simulation ─────────────────────────────────────────────────────────────
+ax.set_xlabel('Epoch')
+ax.set_ylabel('RMSE (m/s²)')
+ax.set_title('Validation RMSE per Axis (wind 0–8 m/s)')
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+ax.set_ylim(bottom=0)
 
-def simulate(model, normalizer, wind_vec, trajectory_fn,
-             use_pinn=True, sim_time=15.0, dt=0.01, K=1000, H=20):
-    # Start from the trajectory position at t=0 to avoid the catch-up phase
-    _traj_init = trajectory_fn()
-    start_pos  = _traj_init.update(0.0)["x"].copy()
+# ── Plot 3: OOD RMSE per axis ────────────────────────────────────────────────
+ax = axes[1, 0]
+ax.plot(df['epoch'], df['ood_rmse_x'], color=C_X, lw=1.2, label='OOD X')
+ax.plot(df['epoch'], df['ood_rmse_y'], color=C_Y, lw=1.2, label='OOD Y')
+ax.plot(df['epoch'], df['ood_rmse_z'], color=C_Z, lw=1.5, label='OOD Z', linestyle='--')
+ax.plot(df['epoch'], ood_mean, color='black', lw=1.5, label='OOD mean', linestyle=':')
 
-    state = {
-        "x":            start_pos,          # Start at trajectory origin
-        "v":            np.zeros(3),
-        "q":            np.array([0.,0.,0.,1.]),
-        "w":            np.zeros(3),
-        "wind":         wind_vec.copy(),
-        "rotor_speeds": np.ones(4)*HOVER_OMEGA,
-    }
-    vehicle    = Multirotor(quad_params, state)
-    controller = SE3Control(quad_params)
-    trajectory = trajectory_fn()
-    mppi       = MPPIController(
-        model, normalizer, wind_vec,
-        K=K, H=H, dt=dt, use_pinn=use_pinn
-    )
+best_ood_idx = ood_mean.idxmin()
+best_ood_ep  = df.loc[best_ood_idx, 'epoch']
+best_ood_val = ood_mean.min()
+ax.scatter([best_ood_ep], [best_ood_val], color='black', zorder=5, s=40)
+ax.text(best_ood_ep + 2, best_ood_val + 0.1,
+        f'ep{int(best_ood_ep)}\n{best_ood_val:.3f}', fontsize=8)
 
-    N = int(sim_time/dt)
-    positions = np.zeros((N,3))
-    ref_pos   = np.zeros((N,3))
-    t = 0.
+ax.set_xlabel('Epoch')
+ax.set_ylabel('RMSE (m/s²)')
+ax.set_title('OOD RMSE per Axis (wind 10–15 m/s)')
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+ax.set_ylim(bottom=0)
 
-    for i in range(N):
-        state['wind'] = wind_vec.copy()
-        flat_ref  = trajectory.update(t)
-        vel_des   = flat_ref['x_dot']
-        pds = np.array([trajectory.update(t+h*dt)['x'] for h in range(H)])
-        vds = np.array([trajectory.update(t+h*dt)['x_dot'] for h in range(H)])
-        mu  = np.array(state.get('rotor_speeds', np.ones(4)*HOVER_OMEGA))
+# ── Plot 4: Val vs OOD Mean RMSE ─────────────────────────────────────────────
+ax = axes[1, 1]
+ax.plot(df['epoch'], val_mean, color=C_VAL, lw=1.5, label='Val Mean RMSE')
+ax.plot(df['epoch'], ood_mean, color=C_OOD, lw=1.5, label='OOD Mean RMSE', linestyle='--')
 
-        if use_pinn:
-            res     = pinn_predict(model, normalizer, state, mu, wind_vec, vel_ref=vel_des)
-            a, dpc, _ = mppi.update(state, pds, vds, mu, res)
-            dp      = a * dpc
-        else:
-            _, dpc, _ = mppi.update(state, pds, vds, mu, np.zeros(3))
-            dp      = np.zeros(3)
+final     = df.iloc[-1]
+final_val = (final['val_rmse_x'] + final['val_rmse_y'] + final['val_rmse_z']) / 3
+final_ood = (final['ood_rmse_x'] + final['ood_rmse_y'] + final['ood_rmse_z']) / 3
 
-        fm = dict(flat_ref)
-        fm['x'] = flat_ref['x'] + dp
-        fm['x_dot'] = flat_ref['x_dot']
-        cmd   = controller.update(t, state, fm)
-        state = vehicle.step(state, cmd, dt)
+ax.annotate(f'Final Val: {final_val:.4f}',
+            xy=(final['epoch'], final_val),
+            xytext=(final['epoch'] - 60, final_val + 0.5),
+            arrowprops=dict(arrowstyle='->', color=C_VAL),
+            fontsize=8, color=C_VAL)
+ax.annotate(f'Final OOD: {final_ood:.3f}',
+            xy=(final['epoch'], final_ood),
+            xytext=(final['epoch'] - 80, final_ood + 1.0),
+            arrowprops=dict(arrowstyle='->', color=C_OOD),
+            fontsize=8, color=C_OOD)
 
-        positions[i] = state['x']
-        ref_pos[i]   = flat_ref['x']
-        t += dt
+ax.set_xlabel('Epoch')
+ax.set_ylabel('Mean RMSE (m/s²)')
+ax.set_title('Val vs OOD Mean RMSE')
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+ax.set_ylim(bottom=0)
 
-    return positions, ref_pos
+plt.tight_layout()
+save_path = os.path.join(RESULT_DIR, 'training_curves.png')
+plt.savefig(save_path, dpi=150, bbox_inches='tight')
+print(f"\nSaved: {save_path}")
 
-
-# ── Plotting Tools ─────────────────────────────────────────────────────────
-
-def plot_traj(ax, ref, actual, color, label,
-              xlim=None, ylim=None, zlim=None,
-              elev=25, azim=-60):
-    ax.plot(ref[:,0], ref[:,1], ref[:,2],
-            color='#7EC8E3', linestyle='--', linewidth=1.0,
-            alpha=0.7, label='Reference')
-    ax.plot(actual[:,0], actual[:,1], actual[:,2],
-            color=color, linewidth=1.8, alpha=0.9, label=label)
-    ax.scatter(*actual[0], color=color, s=25, zorder=5)
-
-    ax.set_xlabel('x [m]', fontsize=7, labelpad=1)
-    ax.set_ylabel('y [m]', fontsize=7, labelpad=1)
-    ax.set_zlabel('z [m]', fontsize=7, labelpad=1)
-    ax.tick_params(labelsize=6)
-    ax.legend(fontsize=7, loc='upper right', framealpha=0.7)
-    ax.view_init(elev=elev, azim=azim)
-    ax.grid(True, alpha=0.15)
-
-    # Fixed axis limits (to avoid axis scaling issues due to numerical noise)
-    if xlim: ax.set_xlim(xlim)
-    if ylim: ax.set_ylim(ylim)
-    if zlim: ax.set_zlim(zlim)
-
-
-# ── Main ─────────────────────────────────────────────────────────────
-
-def main():
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D  # noqa
-
-    os.makedirs(RESULT_DIR, exist_ok=True)
-    model, normalizer = load_pinn_model()
-
-    wind8 = np.array([8., 0., 0.])
-
-    trajs = {
-        'hover':   lambda: HoverTraj(x0=np.array([0.,0.,1.5])),
-        'circle':  lambda: ThreeDCircularTraj(
-            center=np.array([0.,0.,1.5]),
-            radius=np.array([1.5,1.5,0.]),
-            freq=np.array([0.2,0.2,0.])),
-        'slanted': lambda: SlantedCircleTraj(
-            center=np.array([0.,0.,1.5]), R=1.5, freq=0.2, tilt_deg=30),
-        'eight':   lambda: FigureEightTraj(
-            center=np.array([0.,0.,1.5]), Ax=1.5, Ay=0.75, freq_x=0.15),
-    }
-
-    traj_titles = {
-        'hover':   'hover',
-        'circle':  'circle',
-        'slanted': 'slanted circle',
-        'eight':   'eight',
-    }
-
-    # Axis limits for each trajectory type
-    axis_limits = {
-        'hover':   dict(xlim=[-0.5,0.8], ylim=[-0.3,0.3], zlim=[0.5,2.5]),
-        'circle':  dict(xlim=[-2.0,2.5], ylim=[-2.0,2.0], zlim=[0.5,2.5]),
-        'slanted': dict(xlim=[-2.0,2.5], ylim=[-2.0,2.0], zlim=[0.0,3.5]),
-        'eight':   dict(xlim=[-2.0,2.5], ylim=[-1.5,1.5], zlim=[0.5,2.5]),
-    }
-
-    # ── Figure 1: Nominal MPPI vs PINN-MPPI (2 rows × 4 columns) ───────────────
-    print("Generating Figure 1: Nominal vs PINN-MPPI (4 trajectories)...")
-    fig1, axes1 = plt.subplots(
-        2, 4, figsize=(18, 8),
-        subplot_kw={'projection': '3d'}
-    )
-    fig1.suptitle(
-        'Nominal MPPI vs PINN-MPPI under Wind Disturbance (8 m/s)',
-        fontsize=13, fontweight='bold', y=1.01
-    )
-
-    for col, tname in enumerate(trajs.keys()):
-        print(f"  {tname}...")
-        lims = axis_limits[tname]
-
-        pos_nom,  ref = simulate(model, normalizer, wind8,
-                                  trajs[tname], use_pinn=False, sim_time=15.)
-        pos_pinn, _   = simulate(model, normalizer, wind8,
-                                  trajs[tname], use_pinn=True,  sim_time=15.)
-
-        ax = axes1[0, col]
-        plot_traj(ax, ref, pos_nom, '#5B9BD5', 'Nominal MPPI', **lims)
-        ax.set_title(f'({chr(97+col)}) Nominal MPPI\n({traj_titles[tname]})',
-                     fontsize=9)
-
-        ax = axes1[1, col]
-        plot_traj(ax, ref, pos_pinn, '#E87B2D', 'PINN-MPPI (ours)', **lims)
-        ax.set_title(f'({chr(97+4+col)}) PINN-MPPI\n({traj_titles[tname]})',
-                     fontsize=9)
-
-    plt.tight_layout()
-    p1 = os.path.join(RESULT_DIR, 'traj_comparison.png')
-    fig1.savefig(p1, dpi=150, bbox_inches='tight')
-    print(f"Figure 1 saved: {p1}")
-
-    # ── Figure 2: Circle trajectory under different wind speeds (PINN-MPPI) ────────────────
-    print("\nGenerating Figure 2: Wind sweep...")
-    wind_list = [
-        (np.array([0.,0.,0.]),  'wind=0'),
-        (np.array([4.,0.,0.]),  'wind=4 m/s'),
-        (np.array([8.,0.,0.]),  'wind=8 m/s'),
-        (np.array([10.,0.,0.]), 'wind=10 m/s (OOD)'),
-        (np.array([12.,0.,0.]), 'wind=12 m/s (OOD)'),
-    ]
-
-    fig2, axes2 = plt.subplots(
-        1, 5, figsize=(22, 4),
-        subplot_kw={'projection': '3d'}
-    )
-    fig2.suptitle(
-        'PINN-MPPI Tracking under Various Wind Conditions (circle trajectory)',
-        fontsize=12, fontweight='bold'
-    )
-
-    for col, (wv, wlabel) in enumerate(wind_list):
-        print(f"  {wlabel}...")
-        pos, ref = simulate(model, normalizer, wv,
-                            trajs['circle'], use_pinn=True, sim_time=15.)
-        # X-axis range expands with wind speed
-        xmax = 2.0 + float(np.linalg.norm(wv)) * 0.1
-        ax = axes2[col]
-        plot_traj(ax, ref, pos, '#E87B2D', 'PINN-MPPI',
-                  xlim=[-xmax, xmax+0.5], ylim=[-2.,2.], zlim=[0.5,2.5])
-        ax.set_title(f'({chr(97+col)}) {wlabel}', fontsize=9)
-
-    plt.tight_layout()
-    p2 = os.path.join(RESULT_DIR, 'traj_wind_sweep.png')
-    fig2.savefig(p2, dpi=150, bbox_inches='tight')
-    print(f"Figure 2 saved: {p2}")
-
-    # ── Figure 3: Four-controller comparison (circle, wind=8) ───────────────────────
-    print("\nGenerating Figure 3: Controller comparison...")
-
-    def se3_only_sim(wind_vec, traj_fn, sim_time=15., dt=0.01):
-        _ti = traj_fn(); sp = _ti.update(0.0)["x"].copy()
-        state = {"x":sp,"v":np.zeros(3),
-                 "q":np.array([0.,0.,0.,1.]),"w":np.zeros(3),
-                 "wind":wind_vec.copy(),"rotor_speeds":np.ones(4)*HOVER_OMEGA}
-        vehicle = Multirotor(quad_params, state)
-        ctrl    = SE3Control(quad_params)
-        traj    = traj_fn()
-        N       = int(sim_time/dt)
-        pos = np.zeros((N,3)); ref = np.zeros((N,3)); t=0.
-        for i in range(N):
-            state['wind'] = wind_vec.copy()
-            flat = traj.update(t)
-            cmd  = ctrl.update(t, state, flat)
-            state = vehicle.step(state, cmd, dt)
-            pos[i]=state['x']; ref[i]=flat['x']; t+=dt
-        return pos, ref
-
-    def oracle_sim(model, normalizer, wind_vec, traj_fn, sim_time=15., dt=0.01):
-        _ti = traj_fn(); sp = _ti.update(0.0)["x"].copy()
-        state = {"x":sp,"v":np.zeros(3),
-                 "q":np.array([0.,0.,0.,1.]),"w":np.zeros(3),
-                 "wind":wind_vec.copy(),"rotor_speeds":np.ones(4)*HOVER_OMEGA}
-        vehicle = Multirotor(quad_params, state)
-        ctrl    = SE3Control(quad_params)
-        traj    = traj_fn()
-        N = int(sim_time/dt)
-        pos=np.zeros((N,3)); ref=np.zeros((N,3)); res_ema=None; t=0.
-        for i in range(N):
-            state['wind'] = wind_vec.copy()
-            flat    = traj.update(t)
-            vel_des = flat['x_dot']
-            mu      = np.array(state.get('rotor_speeds', np.ones(4)*HOVER_OMEGA))
-            r       = pinn_predict(model, normalizer, state, mu,
-                                   wind_vec, vel_ref=vel_des)
-            if res_ema is None: res_ema=r.copy()
-            else: res_ema = EMA_ALPHA*res_ema+(1-EMA_ALPHA)*r
-            dp = np.clip(-res_ema/KP_POS, -DP_CALC_MAX, DP_CALC_MAX)
-            fm=dict(flat); fm['x']=flat['x']+dp; fm['x_dot']=flat['x_dot']
-            cmd   = ctrl.update(t, state, fm)
-            state = vehicle.step(state, cmd, dt)
-            pos[i]=state['x']; ref[i]=flat['x']; t+=dt
-        return pos, ref
-
-    fig3, axes3 = plt.subplots(1, 2, figsize=(14, 5),
-                                subplot_kw={'projection': '3d'})
-    fig3.suptitle('Controller Comparison (circle, wind=8 m/s)',
-                  fontsize=12, fontweight='bold')
-
-    lims_c = axis_limits['circle']
-
-    print("  SE3 only...")
-    pos_se3, ref_c = se3_only_sim(wind8, trajs['circle'])
-    print("  Oracle...")
-    pos_ora, _     = oracle_sim(model, normalizer, wind8, trajs['circle'])
-    print("  Nominal MPPI...")
-    pos_nom_c, _   = simulate(model, normalizer, wind8, trajs['circle'],
-                               use_pinn=False)
-    print("  PINN-MPPI...")
-    pos_pinn_c, _  = simulate(model, normalizer, wind8, trajs['circle'],
-                               use_pinn=True)
-
-    # Left: SE3 vs Oracle
-    ax = axes3[0]
-    ax.plot(ref_c[:,0], ref_c[:,1], ref_c[:,2],
-            color='#7EC8E3', linestyle='--', linewidth=1., alpha=0.7,
-            label='Reference')
-    ax.plot(pos_se3[:,0], pos_se3[:,1], pos_se3[:,2],
-            color='#5B9BD5', linewidth=1.8, label='SE3 only')
-    ax.plot(pos_ora[:,0], pos_ora[:,1], pos_ora[:,2],
-            color='#70AD47', linewidth=1.8, label='Oracle (α=1)')
-    ax.set_title('(a) SE3 only  vs  Oracle', fontsize=10)
-    ax.legend(fontsize=8); ax.view_init(25,-60); ax.grid(True, alpha=0.15)
-    ax.set_xlabel('x [m]',fontsize=8); ax.set_ylabel('y [m]',fontsize=8)
-    ax.set_zlabel('z [m]',fontsize=8); ax.tick_params(labelsize=7)
-    ax.set_xlim(lims_c['xlim']); ax.set_ylim(lims_c['ylim'])
-    ax.set_zlim(lims_c['zlim'])
-
-    # Right: Nominal vs PINN-MPPI
-    ax = axes3[1]
-    ax.plot(ref_c[:,0], ref_c[:,1], ref_c[:,2],
-            color='#7EC8E3', linestyle='--', linewidth=1., alpha=0.7,
-            label='Reference')
-    ax.plot(pos_nom_c[:,0], pos_nom_c[:,1], pos_nom_c[:,2],
-            color='#5B9BD5', linewidth=1.8, alpha=0.7, label='Nominal MPPI')
-    ax.plot(pos_pinn_c[:,0], pos_pinn_c[:,1], pos_pinn_c[:,2],
-            color='#E87B2D', linewidth=1.8, label='PINN-MPPI (ours)')
-    ax.set_title('(b) Nominal MPPI  vs  PINN-MPPI', fontsize=10)
-    ax.legend(fontsize=8); ax.view_init(25,-60); ax.grid(True, alpha=0.15)
-    ax.set_xlabel('x [m]',fontsize=8); ax.set_ylabel('y [m]',fontsize=8)
-    ax.set_zlabel('z [m]',fontsize=8); ax.tick_params(labelsize=7)
-    ax.set_xlim(lims_c['xlim']); ax.set_ylim(lims_c['ylim'])
-    ax.set_zlim(lims_c['zlim'])
-
-    plt.tight_layout()
-    p3 = os.path.join(RESULT_DIR, 'traj_controller_compare.png')
-    fig3.savefig(p3, dpi=150, bbox_inches='tight')
-    print(f"Figure 3 saved: {p3}")
-
-    print(f"\nAll tasks complete!\n  {p1}\n  {p2}\n  {p3}")
-
-
-if __name__ == '__main__':
-    main()
+# ── Summary ───────────────────────────────────────────────────────────────────
+print(f"\n{'='*50}")
+print("TRAINING RESULT SUMMARY")
+print(f"{'='*50}")
+best_row = df.loc[val_mean.idxmin()]
+print(f"Best epoch (lowest val mean) : {int(best_row['epoch'])}")
+print(f"  Val  X/Y/Z : {best_row['val_rmse_x']:.4f} / "
+      f"{best_row['val_rmse_y']:.4f} / {best_row['val_rmse_z']:.4f}")
+print(f"  OOD  X/Y/Z : {best_row['ood_rmse_x']:.4f} / "
+      f"{best_row['ood_rmse_y']:.4f} / {best_row['ood_rmse_z']:.4f}")
+print(f"  Val  mean  : {val_mean.loc[best_row.name]:.4f} m/s²")
+ood_at_best = (best_row['ood_rmse_x'] + best_row['ood_rmse_y'] + best_row['ood_rmse_z']) / 3
+print(f"  OOD  mean  : {ood_at_best:.4f} m/s²")
+print(f"  OOD/Val ratio : {ood_at_best / (val_mean.loc[best_row.name] + 1e-9):.1f}x")

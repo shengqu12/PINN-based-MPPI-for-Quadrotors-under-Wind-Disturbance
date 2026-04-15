@@ -37,7 +37,7 @@ class ResidualPINN(nn.Module):
 
         # ── C_d net: predict drag coefficients(x,y,z) ────────────────────────────
         # input: x(17)
-        # output: drag coefficients (3,)，Softplus ensures >= 0
+        # output: drag coefficients (3,), Softplus ensures >= 0
         layers = []
         in_dim = input_dim
         for h in hidden_dims:
@@ -49,14 +49,19 @@ class ResidualPINN(nn.Module):
 
         # ── Rotor net: predict rotor effects ───────────────────────────────
         # input: omega(3) + u(4) = 7
-        # output: rotor forces (3,)，Softplus ensures >= 0
-        self.rotor_net = nn.Sequential(
-            nn.Linear(7, 64),
-            nn.Tanh(),
-            nn.Linear(64, 32),
-            nn.Tanh(),
-            nn.Linear(32, output_dim),
-        )
+        #   (wind/v_rel excluded to avoid overlap with cd_net)
+        # Smaller capacity keeps total params ~29K so the physics constraint
+        # provides meaningful regularisation guidance.
+        rotor_in = 7   # x[:, 7:14] = omega + u
+        rotor_hidden = (64, 32)
+        rotor_layers = []
+        in_dim = rotor_in
+        for h in rotor_hidden:
+            rotor_layers.append(nn.Linear(in_dim, h))
+            rotor_layers.append(nn.Tanh())
+            in_dim = h
+        rotor_layers.append(nn.Linear(in_dim, output_dim))
+        self.rotor_net = nn.Sequential(*rotor_layers)
 
         self._init_weights()
 
@@ -79,21 +84,12 @@ class ResidualPINN(nn.Module):
         v_rel_mag = torch.norm(v_rel, dim=1, keepdim=True)
         f_aero    = -C_d * v_rel * v_rel_mag
 
-        # F_rotor: rotor-induced force, mainly in Z axis, predicted by another MLP.
-        # omega: x[:,7:10]，u: x[:,10:14]
-        rotor_input = x[:, 7:14]   # (B,7)
+        # F_rotor: rotor-induced force (quat + omega + u = 11 inputs)
+        # quat: x[:,3:7], omega: x[:,7:10], u: x[:,10:14]
+        rotor_input = x[:, 7:14]   # (B,7) omega + u
         f_rotor     = self.rotor_net(rotor_input)
 
         return f_aero + f_rotor
-
-    def forward_rotor_z(self, x):
-        """
-        forward pass for rotor net Z output only, used for downwash loss calculation.
-        """
-        rotor_input = x[:, 7:14]
-        f_rotor = self.rotor_net(rotor_input)
-        return f_rotor[:, 2]   # (B,) Z axis only
-
 
 if __name__ == '__main__':
     model = ResidualPINN(input_dim=17)
@@ -110,4 +106,4 @@ if __name__ == '__main__':
     mag   = torch.norm(v_rel, dim=1, keepdim=True)
     f_aero = -C_d * v_rel * mag
     dot   = (f_aero * v_rel).sum(dim=1)
-    print(f"f_aero·v_rel maximum: {dot.max().item():.6f}（must <= 0）✓")
+    print(f"f_aero dot v_rel maximum: {dot.max().item():.6f} (must <= 0)")

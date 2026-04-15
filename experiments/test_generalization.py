@@ -11,11 +11,11 @@ Test1:
     Training is only based on x direction wind.
 
 Test2: 
-    lemniscate traj 
-    Training only uses hover and circle。
+    Lissajous figure-8 trajectory (vertical orientation)
+    Training used horizontal-orientation Lissajous; this tests same-family generalization.
 
 Test3:
-    OOD wind + lemniscate traj
+   OOD wind speed + Lissajous figure-8 (trajectory seen in training family)
 
 """
 
@@ -44,7 +44,7 @@ OMEGA_MAX   = quad_params['rotor_speed_max']
 HOVER_OMEGA = float(np.sqrt(MASS * G / (4 * K_ETA)))
 KP_POS      = np.array([6.5, 6.5, 15.0])
 
-# MPPI parameter K: traj rollour H：horizon
+# MPPI parameters: K = num trajectories, H = horizon
 MPPI_K = 896
 MPPI_H = 15
 
@@ -60,13 +60,15 @@ def load_pinn():
     return model, normalizer
 
 
-# ── lemniscate traj ─────────────────────────────────────────────────────────
+# ── Lissajous figure-8 traj (vertical orientation) ─────────────────────────────────────────────────────────
 
-class FigureEightTraj:
+class LissajousVerticalTraj:
     """
-    Lissajous:
+    Vertical-orientation Lissajous (1:2 frequency ratio):
         x(t) = Ax * sin(ωx * t)
-        y(t) = Ay * sin(2ωx * t + π/2)
+        y(t) = Ay * cos(2ωx * t)
+    NOTE: Training used TwoDLissajous (horizontal variant from RotorPy).
+    This tests generalization within the same curve family.
     """
     def __init__(self, center=np.array([0., 0., 1.5]),
                  Ax=1.5, Ay=1.5, freq_x=0.15):
@@ -215,7 +217,7 @@ def main():
               f"{e_pinn:10.4f} | {improv:+7.1f}% {tag}")
         wind_results[name] = {'nom': e_nom, 'pinn': e_pinn}
 
-    # ── Test2：traj generalization ───────────────────────────────────────────────
+    # ── Test 2: trajectory generalization ────────────────────────────────────────
     print("\n" + "=" * 62)
     print("Test2:traj generalization(under X 8 m/s)")
     print("=" * 62)
@@ -230,10 +232,10 @@ def main():
                                 radius=np.array([1.5, 1.5, 0.]),
                                 freq=np.array([0.2, 0.2, 0.])),
                              'trained'),
-        'lemniscate(Unseen)':    (lambda: FigureEightTraj(
+        'Lissajous-vertical(Similar)':    (lambda: LissajousVerticalTraj(
                                 center=np.array([0., 0., 1.5]),
                                 Ax=1.5, Ay=1.5, freq_x=0.15),
-                             'test'),
+                             'similiar'),
         'Smaller circle r=0.5m(Unseen)': (lambda: ThreeDCircularTraj(
                                 center=np.array([0., 0., 1.5]),
                                 radius=np.array([0.5, 0.5, 0.]),
@@ -264,12 +266,12 @@ def main():
             'nom': e_nom, 'pinn': e_pinn, 'type': traj_type
         }
 
-    # ── Test3：Double Generalization Test ───────────────────────────────────────────────
+    # ── Test 3: Double Generalization Test ───────────────────────────────────────
     print("\n" + "=" * 62)
-    print("Test3:Double Generalization Test(OOD wind + lemniscate)")
+    print("Test3: Wind-Speed OOD on Lissajous figure-8 (trajectory seen in training family)")
     print("=" * 62)
 
-    traj_eight = lambda: FigureEightTraj(
+    traj_eight = lambda: LissajousVerticalTraj(
         center=np.array([0., 0., 1.5]), Ax=1.5, Ay=1.5, freq_x=0.15
     )
 
@@ -359,7 +361,7 @@ def main():
                            label='_unseen_traj' if i==2 else '')
         ax.set_xticks(x)
         ax.set_xticklabels(['Hover\n(Trained)', 'Circle\n(Trained)',
-                            'Lemniscate\n(Unseen)', 'Smaller Circle\n(Unseen)', 'Bigger Circle\n(Unseen)'],
+                            'Lissajous\n(Unseen)', 'Smaller Circle\n(Unseen)', 'Bigger Circle\n(Unseen)'],
                            fontsize=8)
         ax.set_ylabel('Mean Error (m)'); ax.set_xlabel('Trajectory Category')
         ax.set_title('Trajectory Generalization\n(X-wind 8m/s)')
@@ -380,7 +382,7 @@ def main():
         ax.set_xticklabels([f'{ws:.0f}m/s\n({"train" if ws==8 else "OOD"})'
                             for ws in ws_list], fontsize=9)
         ax.set_ylabel('Mean Error (m)'); ax.set_xlabel('Wind Speed')
-        ax.set_title('Double Generalization\n(OOD wind speed + lemniscate)')
+        ax.set_title('Wind-Speed OOD\n(Lissajous figure-8 trajectory)')
         ax.legend(fontsize=8); ax.grid(True, alpha=0.3, axis='y')
         add_improv_labels(ax, x, noms, pinns)
 

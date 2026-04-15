@@ -1,14 +1,18 @@
 """
-ablation.py  ----ablation of PINN
+ablation_pinn.py — Ablation study: does the C4v symmetry loss help?
 
-ablation variant:
-    full        : full model (ours)
-    no_sym      : no symmetry constraint (lambda_sym=0)
-    no_curr     : no curriculum (train on full wind range from epoch 1)
-    no_downwash : no downwash constraint (lambda_dw=0)
+Two variants answer one question:
 
+  Q: Does the C4v symmetry loss improve OOD generalisation?
+      full   : PINN (EDC + rotor) + constant lambda_sym
+      no_sym : PINN (EDC + rotor), regression only (lambda_sym = 0)
 
-outputs:
+Both use the same ResidualPINN architecture (29K params).
+No cyclical annealing — lambda_sym is held constant throughout training.
+
+Normalizer: std_omx == std_omy enforced via symmetrize_xy().
+
+Outputs:
     checkpoints/ablation_{variant}/best_model.pt
     checkpoints/ablation_results.csv
     checkpoints/ablation_table.txt
@@ -18,59 +22,36 @@ import os, sys, csv, time
 import torch
 import torch.optim as optim
 import numpy as np
-from torch.utils.data import DataLoader
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from training.dataset import make_dataloaders, ResidualDataset, Normalizer
-from training.losses import total_loss
+from training.dataset import make_dataloaders
+from training.losses import loss_regression, total_loss
 from models.pinn import ResidualPINN
 
 BASE_DIR = os.path.join(os.path.dirname(__file__), '..')
 DATA_DIR = os.path.join(BASE_DIR, 'data', 'raw')
 CKPT_DIR = os.path.join(BASE_DIR, 'checkpoints')
 
+
 # ── Variant definitions ──────────────────────────────────────────────────────
-# All variants use 17-dim inputs, only change loss weights and curriculum switch
+#
+# lambda_sym > 0 enables the C4v symmetry loss (constant throughout training).
+# Both variants use ResidualPINN — only the symmetry loss is toggled.
+
 VARIANTS = {
     'full': {
-        'description': 'Full model (ours)',
-        'lambda_sym':   0.05,
-        'lambda_dw':    0.0,
-        'curriculum':   True,
-        'epochs':       300,
-        'patience':     40,
+        'description': 'Full PINN (EDC + C4v sym)',
+        'lambda_sym':  0.1,
+        'epochs':      300,
+        'patience':    40,
     },
     'no_sym': {
-        'description': 'w/o symmetry loss',
-        'lambda_sym':   0.0,   # ← no symmetry constraint
-        'lambda_dw':    0.0,
-        'curriculum':   True,
-        'epochs':       300,
-        'patience':     40,
-    },
-    'no_curr': {
-        'description': 'w/o curriculum',
-        'lambda_sym':   0.5,
-        'lambda_dw':    0.0,
-        'curriculum':   False,  # ← no curriculum
-        'epochs':       300,
-        'patience':     40,
-    },
-
-        'with_downwash': {
-        'description': 'w/ downwash loss',
-        'lambda_sym':  0.5,
-        'lambda_dw':   0.1,
-        'curriculum':  True,
+        'description': 'PINN w/o symmetry loss',
+        'lambda_sym':  0.0,
         'epochs':      300,
         'patience':    40,
     },
 }
-
-CURRICULUM_SCHEDULE = [
-    (1,   60,  4.0),
-    (61,  300, 8.0),
-]
 
 BATCH_SIZE = 512
 LR         = 1e-3
@@ -79,26 +60,12 @@ SEED       = 42
 
 # ── Helper functions ──────────────────────────────────────────────────
 
-def get_wind_max(epoch):
-    for start, end, wmax in CURRICULUM_SCHEDULE:
-        if start <= epoch <= end:
-            return wmax
-    return 8.0
-
-
-def build_train_loader(data_dir, wind_max, normalizer, batch_size):
-    """build train loader for given wind_max (curriculum stage)"""
-    ds = ResidualDataset(data_dir, wind_max_train=wind_max, split='train')
-    ds.X = normalizer.transform(ds.X)
-    return DataLoader(ds, batch_size=batch_size, shuffle=True)
-
-
 def evaluate(model, loader, norm_mean, norm_std, device):
-    """calculate RMSE for each axis (m/s²)."""
+    """Per-axis RMSE (m/s^2)."""
     model.eval()
     all_pred, all_target = [], []
     with torch.no_grad():
-        for X, y, _, motor_speeds in loader:   # dataset returns (X, y, wind_speed, motor_speeds)
+        for X, y, _, _ in loader:
             X     = X.to(device)
             v_rel = X[:, 0:3] * norm_std[0:3] + norm_mean[0:3]
             pred  = model(X, v_rel)
@@ -106,17 +73,17 @@ def evaluate(model, loader, norm_mean, norm_std, device):
             all_target.append(y)
     pred   = torch.cat(all_pred)
     target = torch.cat(all_target)
-    return ((pred - target) ** 2).mean(dim=0).sqrt().numpy()   # (3,)
+    return ((pred - target) ** 2).mean(dim=0).sqrt().numpy()
 
 
-# ── Single variant training ──────────────────────────────────────────────────────
+# ── Single variant training ──────────────────────────────────────────────────
 
 def train_variant(name, cfg, device):
+    lambda_sym = cfg['lambda_sym']
     print(f"\n{'='*60}")
-    print(f"Variant: {name}  ({cfg['description']})")
-    print(f"  lambda_sym={cfg['lambda_sym']}  "
-          f"lambda_dw={cfg['lambda_dw']}  "
-          f"curriculum={cfg['curriculum']}")
+    print(f"Variant : {name}  ({cfg['description']})")
+    print(f"  model      = ResidualPINN")
+    print(f"  lambda_sym = {lambda_sym}  (constant)")
     print(f"{'='*60}")
 
     torch.manual_seed(SEED)
@@ -125,16 +92,17 @@ def train_variant(name, cfg, device):
     ckpt_dir = os.path.join(CKPT_DIR, f'ablation_{name}')
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    # Normalizer fit on training set (wind 0-8 m/s) and save
-    _, val_loader, ood_loader, normalizer = make_dataloaders(
+    train_loader, val_loader, ood_loader, normalizer = make_dataloaders(
         DATA_DIR, batch_size=BATCH_SIZE, wind_max_train=8.0
     )
     normalizer.save(os.path.join(ckpt_dir, 'normalizer.pt'))
     norm_mean = normalizer.mean.to(device)
     norm_std  = normalizer.std.to(device)
 
-    # All variants: 17-dim inputs
-    model     = ResidualPINN(input_dim=17).to(device)
+    model    = ResidualPINN(input_dim=17).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"  Parameters: {n_params:,}")
+
     optimizer = optim.Adam(model.parameters(), lr=LR)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=15
@@ -142,59 +110,40 @@ def train_variant(name, cfg, device):
 
     best_val_loss    = float('inf')
     patience_counter = 0
-    current_wind_max = None
-    train_loader     = None
     t_start          = time.time()
 
     for epoch in range(1, cfg['epochs'] + 1):
 
-        # Curriculum learning: adjust wind_max according to schedule
-        if cfg['curriculum']:
-            wind_max = get_wind_max(epoch)
-        else:
-            wind_max = 8.0   # No curriculum: use full dataset from epoch 1
-
-        if wind_max != current_wind_max:
-            current_wind_max = wind_max
-            train_loader = build_train_loader(
-                DATA_DIR, wind_max, normalizer, BATCH_SIZE
-            )
-            print(f"  [Curriculum] epoch {epoch}: wind_max={wind_max} m/s  "
-                  f"n={len(train_loader.dataset)}")
-
         model.train()
-        sums = {'reg': 0., 'sym': 0., 'dw': 0., 'total': 0.}
-        nb   = 0
+        total_loss_sum = 0.0
+        nb             = 0
 
-        for X, y, _, motor_speeds in train_loader:
-            X            = X.to(device)
-            y            = y.to(device)
-            motor_speeds = motor_speeds.to(device)
-            v_rel        = X[:, 0:3] * norm_std[0:3] + norm_mean[0:3]
+        for X, y, _, _ in train_loader:
+            X = X.to(device)
+            y = y.to(device)
 
-            pred = model(X, v_rel)
-            loss, bd = total_loss(
-                pred=pred, target=y,
-                model=model, X_batch=X,
-                normalizer_mean=norm_mean,
-                normalizer_std=norm_std,
-                motor_speeds_phys=motor_speeds,
-                lambda_sym=cfg['lambda_sym'],
-                lambda_dw=cfg['lambda_dw'],
-            )
+            v_rel = X[:, 0:3] * norm_std[0:3] + norm_mean[0:3]
+            pred  = model(X, v_rel)
+
+            if lambda_sym > 0:
+                loss, _ = total_loss(
+                    pred=pred, target=y,
+                    model=model, X_batch=X,
+                    norm_mean=norm_mean, norm_std=norm_std,
+                    lambda_sym=lambda_sym,
+                )
+            else:
+                loss = loss_regression(pred, y)
 
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            sums['reg']   += bd['reg']
-            sums['sym']   += bd['sym']
-            sums['dw']    += bd['dw']
-            sums['total'] += loss.item()
-            nb            += 1
+            total_loss_sum += loss.item()
+            nb             += 1
 
-        avg = {k: v / nb for k, v in sums.items()}
+        avg = total_loss_sum / nb
 
         val_rmse = evaluate(model, val_loader, norm_mean, norm_std, device)
         ood_rmse = evaluate(model, ood_loader, norm_mean, norm_std, device)
@@ -203,16 +152,14 @@ def train_variant(name, cfg, device):
 
         if epoch <= 3 or epoch % 50 == 0:
             print(f"  Epoch {epoch:3d} | "
-                  f"total={avg['total']:.4f} "
-                  f"reg={avg['reg']:.4f} "
-                  f"sym={avg['sym']:.4f} "
-                  f"dw={avg['dw']:.4f} | "
+                  f"loss={avg:.4f} lam={lambda_sym:.4f} | "
                   f"val=[{val_rmse[0]:.3f},{val_rmse[1]:.3f},{val_rmse[2]:.3f}] | "
                   f"ood=[{ood_rmse[0]:.3f},{ood_rmse[1]:.3f},{ood_rmse[2]:.3f}]")
 
         if val_mean < best_val_loss:
             best_val_loss    = val_mean
             patience_counter = 0
+            os.makedirs(ckpt_dir, exist_ok=True)   # ensure dir exists before save
             torch.save({
                 'epoch':       epoch,
                 'model_state': model.state_dict(),
@@ -249,13 +196,13 @@ def train_variant(name, cfg, device):
     }
 
 
-# ── Results printing ──────────────────────────────────────────────────────────
+# ── Results table ──────────────────────────────────────────────────────────
 
 def print_table(results):
     header = (
-        f"{'Method':<28} | "
-        f"{'Val x':>6} {'Val y':>6} {'Val z':>6} {'Val μ':>6} | "
-        f"{'OOD x':>6} {'OOD y':>6} {'OOD z':>6} {'OOD μ':>6}"
+        f"{'Method':<32} | "
+        f"{'Val x':>6} {'Val y':>6} {'Val z':>6} {'Val M':>6} | "
+        f"{'OOD x':>6} {'OOD y':>6} {'OOD z':>6} {'OOD M':>6}"
     )
     sep = "-" * len(header)
     print("\n" + sep)
@@ -263,13 +210,20 @@ def print_table(results):
     print(sep)
     for r in results:
         print(
-            f"{r['description']:<28} | "
+            f"{r['description']:<32} | "
             f"{r['val_x']:6.3f} {r['val_y']:6.3f} {r['val_z']:6.3f} "
             f"{r['val_mean']:6.3f} | "
             f"{r['ood_x']:6.3f} {r['ood_y']:6.3f} {r['ood_z']:6.3f} "
             f"{r['ood_mean']:6.3f}"
         )
     print(sep)
+    print("\nAblation analysis:")
+    full   = next((r for r in results if r['name'] == 'full'),   None)
+    no_sym = next((r for r in results if r['name'] == 'no_sym'), None)
+    if full and no_sym:
+        delta = no_sym['ood_mean'] - full['ood_mean']
+        sign  = 'sym helps (+OOD)' if delta > 0 else 'sym hurts (-OOD)'
+        print(f"  C4v sym effect (OOD mean): {delta:+.3f} m/s^2  [{sign}]")
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -277,6 +231,12 @@ def print_table(results):
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
+
+    # Pre-create all checkpoint directories
+    os.makedirs(CKPT_DIR, exist_ok=True)
+    for name in VARIANTS:
+        os.makedirs(os.path.join(CKPT_DIR, f'ablation_{name}'), exist_ok=True)
+
     print(f"Running {len(VARIANTS)} ablation variants...\n")
 
     results = []
@@ -284,7 +244,7 @@ def main():
         result = train_variant(name, cfg, device)
         results.append(result)
 
-    # save CSV
+    # Save CSV
     csv_path = os.path.join(CKPT_DIR, 'ablation_results.csv')
     with open(csv_path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=results[0].keys())
@@ -292,25 +252,24 @@ def main():
         writer.writerows(results)
     print(f"\nCSV saved: {csv_path}")
 
-    # print table
+    # Print and save table
     print_table(results)
 
-    # save table text
     txt_path = os.path.join(CKPT_DIR, 'ablation_table.txt')
-    with open(txt_path, 'w') as f:
-        f.write("Ablation Experiment — Residual Prediction RMSE (m/s²)\n")
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write("Ablation Experiment -- Residual Prediction RMSE (m/s^2)\n")
         f.write("Val: wind 0-8 m/s (within training distribution)\n")
         f.write("OOD: wind 10-15 m/s (outside training distribution)\n\n")
         header = (
-            f"{'Method':<28} | "
-            f"{'Val x':>6} {'Val y':>6} {'Val z':>6} {'Val μ':>6} | "
-            f"{'OOD x':>6} {'OOD y':>6} {'OOD z':>6} {'OOD μ':>6}\n"
+            f"{'Method':<32} | "
+            f"{'Val x':>6} {'Val y':>6} {'Val z':>6} {'Val M':>6} | "
+            f"{'OOD x':>6} {'OOD y':>6} {'OOD z':>6} {'OOD M':>6}\n"
         )
         f.write(header)
         f.write("-" * len(header) + "\n")
         for r in results:
             f.write(
-                f"{r['description']:<28} | "
+                f"{r['description']:<32} | "
                 f"{r['val_x']:6.3f} {r['val_y']:6.3f} {r['val_z']:6.3f} "
                 f"{r['val_mean']:6.3f} | "
                 f"{r['ood_x']:6.3f} {r['ood_y']:6.3f} {r['ood_z']:6.3f} "

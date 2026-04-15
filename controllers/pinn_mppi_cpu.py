@@ -3,14 +3,13 @@ mppi_pinn.py — PINN-MPPI controller (ours)
 
 MPPI design:
     rollout model: complete nominal dynamics (thrust + gravity + torque + PINN residual)
-    control variables:    position compensation gain a ∈ [0, alpha_max]
-    parameters:        K=896, H=15, dt=0.01s
+    control variables: position compensation gain a ∈ [0, alpha_max]
+    parameters: K=896, H=15, dt=0.01s
 
     device : CPU
 
 PINN input (17-dimensional):
     v_rel(3) | quat(4) | omega(3) | u(4) | wind(3)
-
 """
 
 import numpy as np
@@ -55,8 +54,8 @@ EMA_ALPHA   = 0.85
 DP_CALC_MAX = 0.25  
 
 
-# ── complete nominal dynamics (batch Euler integration) ──────────────────────────────────
-# using Euler integration for simplicity because it runs on CPU
+# ── Complete nominal dynamics (batch Euler integration) ──────────────────────────────────
+# Using Euler integration for simplicity because it runs on CPU
 
 def quat_rotate_batch(q, v):
     """quaternion rotation, q:(K,4) [qx,qy,qz,qw], v:(K,3)"""
@@ -83,12 +82,11 @@ def quat_mul_batch(q1, q2):
 
 def nominal_step_batch(pos, vel, quat, omega, u, dt):
     """
-    nominal dynamics rollout 
-    Where's the drone going in dt sec if apply u.
-
+    Nominal dynamics rollout:
+    Where the drone is going in dt sec if we apply u.
     """
     K = pos.shape[0]
-    F_i = K_ETA * u**2                              # (K,4) 各电机推力
+    F_i = K_ETA * u**2                               # (K,4) each rotor's thrust
 
     T               = F_i.sum(dim=1)
     thrust_body     = torch.zeros(K, 3)
@@ -101,7 +99,7 @@ def nominal_step_batch(pos, vel, quat, omega, u, dt):
 
     arm   = torch.tensor(ROTOR_POS, dtype=torch.float32)
     tau_x = (arm[:,1] * F_i).sum(dim=1)
-    tau_y = (arm[:,0] * F_i).sum(dim=1)
+    tau_y = (-arm[:,0] * F_i).sum(dim=1)
     tau_z = (torch.tensor(ROTOR_DIR, dtype=torch.float32) * F_i * K_M).sum(dim=1)
     tau   = torch.stack([tau_x, tau_y, tau_z], dim=1)
 
@@ -121,16 +119,16 @@ def nominal_step_batch(pos, vel, quat, omega, u, dt):
     return pos_new, vel_new, quat_new, omega_new
 
 
-# ── PINN batch inference（17 dimensions，reference velocity）───────────────────────────────────
+# ── PINN batch inference (17 dimensions, reference velocity) ───────────────────────────────────
 
 def pinn_batch_refvel(model, normalizer, vel_ref, quat, omega,
-                      motor_speeds, wind_vec):
+                     motor_speeds, wind_vec):
     """
     vel_ref: (K,3) reference velocity for the horizon start point (t=0)
     """
     K     = vel_ref.shape[0]
     wind  = torch.tensor(wind_vec, dtype=torch.float32).expand(K, 3)
-    v_rel = vel_ref - wind    # 参考速度 - 风速
+    v_rel = vel_ref - wind    # Reference velocity - Wind velocity
     X     = torch.cat([v_rel, quat, omega, motor_speeds, wind], dim=1)
     X_norm = (X - normalizer.mean) / normalizer.std
     with torch.no_grad():
@@ -139,7 +137,7 @@ def pinn_batch_refvel(model, normalizer, vel_ref, quat, omega,
 
 def pinn_predict(model, normalizer, state, motor_speeds,
                  wind_vec, vel_ref=None):
-    """单步 PINN 推理（用于闭环控制）"""
+    """Single step PINN inference (used for closed-loop control)"""
     vel   = vel_ref.astype(np.float32) if vel_ref is not None \
             else state['v'].astype(np.float32)
     quat  = state['q'].astype(np.float32)
@@ -155,23 +153,23 @@ def pinn_predict(model, normalizer, state, motor_speeds,
         return model(X_norm, vr_t).squeeze(0).numpy()
 
 
-# ── MPPI 控制器 ───────────────────────────────────────────────────────
+# ── MPPI Controller ───────────────────────────────────────────────────────
 
 class MPPIController:
     """
-    MPPI 
+    MPPI Controller
 
-    Rollout 模型：
-        完整名义动力学（pos, vel, quat, omega 全部积分）
-        + PINN 残差（用参考速度预测）
+    Rollout Model:
+        Complete nominal dynamics (integrates pos, vel, quat, omega)
+        + PINN residual (predicted using reference velocity)
 
-    控制变量：
-        位置补偿增益 α ∈ [0, alpha_max]
+    Control variables:
+        Position compensation gain α ∈ [0, alpha_max]
         Δp = α × clip(-r_ema / kp, -0.25, 0.25)
 
-    参数推荐：
-        K=1000, H=20 → 实测 ~50-100Hz（CPU）
-        K=500,  H=10 → 实测 ~100-200Hz（CPU）
+    Recommended Parameters:
+        K=1000, H=20 → ~50-100Hz (CPU)
+        K=500,  H=10 → ~100-200Hz (CPU)
     """
 
     def __init__(self, model, normalizer, wind_vec,
@@ -205,7 +203,7 @@ class MPPIController:
         self.kd = torch.tensor(KD_POS, dtype=torch.float32)
 
     def update_ema(self, residual):
-        """EMA 更新 + 安全限幅"""
+        """EMA Update + Safety Clipping"""
         if self.residual_ema is None:
             self.residual_ema = residual.copy()
         else:
@@ -217,14 +215,14 @@ class MPPIController:
     def _rollout(self, state, U_sampled, pos_des_seq,
                  vel_des_seq, delta_p_calc, motor_speeds_est):
         """
-        完整动力学 rollout（不再是极简线性模型）。
+        Complete dynamics rollout (no longer a simplified linear model).
 
-        每步：
-            1. 根据 α 计算位置补偿 Δp
-            2. SE3 近似：a_cmd = kp*(p_des+Δp-pos) + kd*(v_des-vel)
-            3. 从 a_cmd 反推悬停附近的电机转速（简化）
-            4. 完整动力学积分（pos, vel, quat, omega）
-            5. PINN 残差修正速度
+        Per step:
+            1. Calculate position compensation Δp based on α
+            2. SE3 approximation: a_cmd = kp*(p_des+Δp-pos) + kd*(v_des-vel)
+            3. Inverse motor speeds near hover from a_cmd (simplified)
+            4. Complete dynamics integration (pos, vel, quat, omega)
+            5. PINN residual correction for velocity
         """
         K = self.K
 
@@ -233,23 +231,23 @@ class MPPIController:
         quat  = torch.tensor(state['q'], dtype=torch.float32).expand(K,-1).clone()
         omega = torch.tensor(state['w'], dtype=torch.float32).expand(K,-1).clone()
 
-        # 用悬停转速近似（简化电机分配）
+        # Approximation using hover speeds (simplified motor allocation)
         u_hover = torch.full((K, 4), HOVER_OMEGA)
 
         U_t     = torch.tensor(U_sampled, dtype=torch.float32)
         dp_base = torch.tensor(delta_p_calc, dtype=torch.float32)
         costs   = torch.zeros(K)
 
-        # PINN 只推理一次（在 horizon 起点）
-        # 物理依据：风速在 H×dt=0.2s 内几乎不变，残差近似常数
-        # 效果：计算量从 H×1.08ms 降到 1×1.08ms，频率从 33Hz → ~110Hz
+        # PINN inference happens only once (at the start of the horizon)
+        # Physical basis: Wind speed is nearly constant within H×dt = 0.2s, residual is approx constant.
+        # Effect: Computation reduced from H×1.08ms to 1×1.08ms, frequency from 33Hz → ~110Hz
         if self.use_pinn:
             vel_ref_0 = torch.tensor(vel_des_seq[0],
                                      dtype=torch.float32).expand(K, -1)
             res_const = pinn_batch_refvel(
                 self.model, self.normalizer,
                 vel_ref_0, quat, omega, u_hover, self.wind_vec
-            )  # (K,3) 在整个 horizon 内保持不变
+            )  # (K,3) stays constant throughout the horizon
         else:
             res_const = torch.zeros(K, 3)
 
@@ -259,15 +257,15 @@ class MPPIController:
             p_des_h = torch.tensor(pos_des_seq[h], dtype=torch.float32)
             v_des_h = torch.tensor(vel_des_seq[h], dtype=torch.float32)
 
-            # 完整动力学积分
+            # Complete dynamics integration
             pos, vel, quat, omega = nominal_step_batch(
                 pos, vel, quat, omega, u_hover, self.dt
             )
 
-            # 用常数残差修正速度（只推理一次）
+            # Correct velocity with constant residual (inference performed once)
             vel = vel + res_const * self.dt
 
-            # 代价：相对原始参考位置（不含补偿）
+            # Cost: relative to original reference position (excluding compensation)
             e_ref  = pos - p_des_h
             costs += self.Q_pos  * (e_ref**2).sum(dim=1)
             costs += self.Q_vel  * (vel**2).sum(dim=1)
@@ -318,7 +316,7 @@ class MPPIController:
         }
 
 
-# ── 闭环仿真 ─────────────────────────────────────────────────────────
+# ── Closed-loop Simulation ─────────────────────────────────────────────────────────
 
 def run_episode(model, normalizer, wind_vec, trajectory_fn,
                 sim_time=15.0, dt=0.01,
@@ -383,16 +381,16 @@ def run_episode(model, normalizer, wind_vec, trajectory_fn,
             )
             delta_p = alpha * delta_p_calc
         else:
-            # Nominal MPPI：残差置零，MPPI 照常运行（K=1000,H=20）
-            # 唯一区别是 rollout 没有风扰信息
-            # 不能强制 delta_p=0，否则 MPPI 完全没有作用，
-            # 对比就变成了 PINN-MPPI vs SE3 only，而不是 vs Nominal MPPI
+            # Nominal MPPI: Residual set to zero, MPPI runs as usual (K=1000, H=20)
+            # Only difference is the rollout lacks wind disturbance information.
+            # We don't force delta_p=0, otherwise MPPI has no effect,
+            # and the comparison would be PINN-MPPI vs SE3 only, rather than vs Nominal MPPI.
             residual_raw = np.zeros(3)
             alpha, delta_p_calc, dt_ms = mppi.update(
                 state, pos_des_seq, vel_des_seq,
                 motor_speeds_est, residual_raw
             )
-            delta_p = alpha * delta_p_calc   # 照常使用 MPPI 输出
+            delta_p = alpha * delta_p_calc   # Use MPPI output as usual
 
         comp_ms[i] = dt_ms
         alphas[i]  = alpha
@@ -412,14 +410,14 @@ def run_episode(model, normalizer, wind_vec, trajectory_fn,
 
         if verbose and i % 50 == 0:
             hz = 1000.0 / dt_ms if dt_ms > 0 else 0
-            print(f"  t={t:.1f}s  误差={errors[i]:.4f}m  "
+            print(f"  t={t:.1f}s  Error={errors[i]:.4f}m  "
                   f"α={alpha:.2f}  {dt_ms:.1f}ms ({hz:.0f}Hz)", end='\r')
 
     if verbose:
         print()
 
     return {
-        'times':      times,
+        'times':     times,
         'positions':  positions,
         'des_pos':    des_pos,
         'errors':     errors,
@@ -439,7 +437,7 @@ def load_pinn_model():
     model = ResidualPINN(input_dim=17)
     model.load_state_dict(ckpt['model_state'])
     model.eval()
-    print(f"加载 PINN（epoch {ckpt['epoch']}）")
+    print(f"Loaded PINN (epoch {ckpt['epoch']})")
     print(f"  Val RMSE : {ckpt['val_rmse'].round(3)}")
     print(f"  OOD RMSE : {ckpt['ood_rmse'].round(3)}")
     return model, normalizer
@@ -448,19 +446,19 @@ def load_pinn_model():
 def main():
     os.makedirs(RESULT_DIR, exist_ok=True)
     model, normalizer = load_pinn_model()
-    print(f"\nSE3 增益: kp={KP_POS.tolist()}, kd={KD_POS.tolist()}")
+    print(f"\nSE3 Gains: kp={KP_POS.tolist()}, kd={KD_POS.tolist()}")
     print(f"EMA={EMA_ALPHA}  DP_CALC_MAX={DP_CALC_MAX}m")
-    print(f"MPPI: K=1000, H=20（完整动力学 rollout）")
+    print(f"MPPI: K=1000, H=20 (Complete dynamics rollout)")
 
-    # 频率预测试
-    print("\n── 控制频率预测试（3秒）──")
+    # Frequency pre-test
+    print("\n── Control Frequency Pre-test (3s) ──")
     _r = run_episode(model, normalizer, np.zeros(3),
                      lambda: HoverTraj(x0=np.array([0.,0.,1.5])),
                      sim_time=3.0, K=1000, H=20,
                      use_pinn=True, verbose=False)
     fs = _r['freq_stats']
-    print(f"  平均: {fs['mean_hz']:.1f}Hz  最低: {fs['min_hz']:.1f}Hz")
-    print(f"  {'✓ 满足实时要求（>50Hz）' if fs['mean_hz'] > 50 else '✗ 太慢，降低 K'}")
+    print(f"  Mean: {fs['mean_hz']:.1f}Hz  Min: {fs['min_hz']:.1f}Hz")
+    print(f"  {'✓ Real-time requirement met (>50Hz)' if fs['mean_hz'] > 50 else '✗ Too slow, consider reducing K'}")
 
     trajectories = {
         'hover':  lambda: HoverTraj(x0=np.array([0., 0., 1.5])),
@@ -482,11 +480,11 @@ def main():
     all_results = {}
     for traj_name, traj_fn in trajectories.items():
         print(f"\n{'='*68}")
-        print(f"轨迹: {traj_name}")
+        print(f"Trajectory: {traj_name}")
         print(f"{'='*68}")
         print(f"\n{'Wind':>6} | {'Split':>5} | "
               f"{'Nominal':>10} | {'PINN-MPPI':>10} | "
-              f"{'改善率':>8} | {'α 均值':>7} | {'Hz':>6}")
+              f"{'Improv':>8} | {'Avg α':>7} | {'Hz':>6}")
         print("-"*64)
 
         results = {}
@@ -500,7 +498,7 @@ def main():
                                    K=1000, H=20, verbose=False)
             improv    = (r_nom['mean_err'] - r_pinn['mean_err']) \
                         / (r_nom['mean_err'] + 1e-9) * 100
-            hz        = r_pinn['freq_stats']['mean_hz']
+            hz         = r_pinn['freq_stats']['mean_hz']
             mean_alpha = r_pinn['mean_alpha']
             print(f"{wind_speed:6.0f} | {split:>5} | "
                   f"{r_nom['mean_err']:10.4f} | "
@@ -518,8 +516,8 @@ def main():
         import matplotlib.pyplot as plt
         fig, axes = plt.subplots(2, 3, figsize=(16, 8))
         fig.suptitle(
-            'PINN-MPPI（K=1000, H=20，完整动力学 rollout）\n'
-            '参考速度输入 + EMA + delta_p 限幅',
+            'PINN-MPPI (K=1000, H=20, Complete dynamics rollout)\n'
+            'Ref Vel Input + EMA + delta_p Clipping',
             fontsize=10
         )
         for row, (traj_name, results) in enumerate(all_results.items()):
@@ -534,7 +532,7 @@ def main():
             ax.bar(x+0.2, pinn_e, 0.4, label='PINN-MPPI', color='darkorange')
             ax.axvline(x=2.5, color='gray', linestyle='--', alpha=0.5)
             ax.set_xticks(x); ax.set_xticklabels([f'{ws}' for ws in ws_list])
-            ax.set_xlabel('Wind (m/s)'); ax.set_ylabel('平均误差 (m)')
+            ax.set_xlabel('Wind (m/s)'); ax.set_ylabel('Mean Error (m)')
             ax.set_title(f'{traj_name}'); ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3, axis='y')
 
@@ -544,7 +542,7 @@ def main():
                     results[ws]['nom']['errors'], 'b-', label='Nominal', alpha=0.8)
             ax.plot(results[ws]['pinn']['times'],
                     results[ws]['pinn']['errors'], 'r--', label='PINN-MPPI', alpha=0.8)
-            ax.set_xlabel('时间 (s)'); ax.set_ylabel('位置误差 (m)')
+            ax.set_xlabel('Time (s)'); ax.set_ylabel('Pos Error (m)')
             ax.set_title(f'{traj_name} wind=8 m/s')
             ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
@@ -554,16 +552,16 @@ def main():
             if all_hz:
                 ax.hist(all_hz, bins=30, color='teal', alpha=0.7, edgecolor='white')
                 ax.axvline(x=np.mean(all_hz), color='red', linestyle='--',
-                           label=f'均值={np.mean(all_hz):.0f}Hz')
-            ax.set_xlabel('Hz'); ax.set_title(f'{traj_name} 控制频率')
+                           label=f'Mean={np.mean(all_hz):.0f}Hz')
+            ax.set_xlabel('Hz'); ax.set_title(f'{traj_name} Control Frequency')
             ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
         path = os.path.join(RESULT_DIR, 'mppi_pinn.png')
         plt.savefig(path, dpi=150, bbox_inches='tight')
-        print(f"\n图表已保存: {path}")
+        print(f"\nChart saved to: {path}")
     except Exception as e:
-        print(f"画图跳过: {e}")
+        print(f"Plotting skipped: {e}")
 
 
 if __name__ == '__main__':

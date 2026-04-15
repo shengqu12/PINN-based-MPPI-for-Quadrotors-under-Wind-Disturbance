@@ -1,10 +1,8 @@
-Ablation Experiment — Residual Prediction RMSE (m/s²)
+Ablation Experiment -- Residual Prediction RMSE (m/s^2)
 Val: wind 0-8 m/s (within training distribution)
 OOD: wind 10-15 m/s (outside training distribution)
 
-Method                       |  Val x  Val y  Val z  Val μ |  OOD x  OOD y  OOD z  OOD μ
------------------------------------------------------------------------------------------
-Full model (ours)            |  0.009  0.010  0.030  0.016 |  1.693  2.109  1.213  1.672
-w/o symmetry loss            |  0.007  0.009  0.029  0.015 |  2.156  1.500  1.163  1.607
-w/o curriculum               |  0.013  0.016  0.042  0.024 |  2.447  2.351  1.146  1.981
-w/ downwash loss             |  0.024  0.029  0.102  0.052 |  1.922  2.931  1.481  2.111
+Method                           |  Val x  Val y  Val z  Val M |  OOD x  OOD y  OOD z  OOD M
+---------------------------------------------------------------------------------------------
+Full PINN (EDC + C4v sym)        |  0.013  0.015  0.040  0.023 |  6.104  6.170  3.339  5.204
+PINN w/o symmetry loss           |  0.010  0.010  0.030  0.017 | 10.435  9.853  1.584  7.291

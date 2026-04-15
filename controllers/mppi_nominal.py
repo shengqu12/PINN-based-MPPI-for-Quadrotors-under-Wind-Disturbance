@@ -113,7 +113,7 @@ def quat_mul_batch(q1, q2):
     ], dim=1)
 
 
-# ── internal（equation: 8-15）──────────────────────────────────────────
+# ── internal (equation: 8-15) ──────────────────────────────────────────
 
 def motor_limit_pipeline(Ft, omega_des, omega_cur, dt):
     """
@@ -260,7 +260,7 @@ class MPPINominal:
             Ft    = u[:, 0]                 # (K,)
             w_des = u[:, 1:]               # (K,3) expexted body rates from MPPI output
 
-            # angular limit（Table I）
+            # angular limit (Table I)
             w_des = torch.cat([
                 torch.clamp(w_des[:,:2], -OMEGA_XY_MAX, OMEGA_XY_MAX),
                 torch.clamp(w_des[:,2:], -OMEGA_Z_MAX, OMEGA_Z_MAX),
@@ -293,7 +293,7 @@ class MPPINominal:
             q_ref = torch.tensor([0., 0., 0., 1.],    dtype=torch.float32)
             w_ref = torch.zeros(3)
 
-            # ── state tracking cost （equation [17-18]）──
+            # ── state tracking cost (equation [17-18]) ──
             e_p  = pos - p_ref
             e_v  = vel - v_ref
             e_w  = omega - w_ref
@@ -306,12 +306,12 @@ class MPPINominal:
                     + self.c_q * d_q
                     + self.c_w * (e_w**2).sum(dim=1))
 
-            # ── control penalty（equation[16]）：||u||²_R ──
+            # ── control penalty (equation[16]): ||u||^2_R ──
             u_nom       = torch.zeros_like(u)
             u_nom[:,0]  = HOVER_THRUST
             costs      += (self.R * (u - u_nom)**2).sum(dim=1)
 
-            # ── control rate penalty（equation[16]）：||Δu||²_R_Δ ──
+            # ── control rate penalty (equation[16]): ||Delta_u||^2_R_delta ──
             if j > 0:
                 du     = U_t[:,j,:] - U_t[:,j-1,:]
                 costs += (self.R_dlt * du**2).sum(dim=1)
@@ -325,25 +325,25 @@ class MPPINominal:
         """
         t0 = time.perf_counter()
 
-        # sampling noise（equation [2]）
+        # sampling noise (equation [2])
         noise       = (np.random.randn(self.K, self.H, 4).astype(np.float32)
                        * self.sigma[None,None,:])
         noise[0]    = 0.0
         U_sampled   = self.U[None,:,:] + noise
 
-        # thrust limit（equation [12]）: clip the collective thrust Ft to [0, 4*T_MAX]
+        # thrust limit (equation [12]): clip the collective thrust Ft to [0, 4*T_MAX]
         U_sampled[:,:,0] = np.clip(U_sampled[:,:,0], 0.0,
                                    4 * T_MAX)
 
-        # Rollout costs estimation（equation [3]）
+        # Rollout costs estimation (equation [3])
         costs = self._rollout(state, U_sampled, ref_seq)
 
-        # MPPI weights（equation [4]）
+        # MPPI weights (equation [4])
         rho     = costs.min()
         weights = np.exp(-(costs - rho) / self.lam)
         weights = weights / (weights.sum() + 1e-8)
 
-        # weighting renew control（equation [5]）
+        # weighted control update (equation [5])
         delta_u = np.einsum('k,khd->hd', weights,
                             U_sampled - self.U[None,:,:])
         U_new   = self.U + delta_u
@@ -376,8 +376,8 @@ class MPPINominal:
 
 def u_to_motor_speeds(u_opt, omega_cur):
     """
-    将 MPPI 输出 [Ft, ωx_des, ωy_des, ωz_des] 转成电机转速。
-    含 NaN 保护：任何异常值回退到悬停转速。
+    Convert MPPI output [Ft, wx_des, wy_des, wz_des] to motor speeds.
+    NaN protection: fall back to hover speed on any invalid value.
     """
     if np.any(np.isnan(u_opt)) or np.any(np.isinf(u_opt)):
         return np.ones(4) * HOVER_OMEGA
@@ -417,7 +417,7 @@ def body_rate_pd_to_motors(omega_des, omega_cur, Ft,
     tau = Kp * J_np * e_w               # (3,) desired torque from PD control
 
     b = np.array([Ft, tau[0], tau[1], tau[2]])
-    T = np.linalg.solve(GAMMA_np, b)    # (4,) 各电机推力
+    T = np.linalg.solve(GAMMA_np, b)    # (4,) per-rotor thrust
     T = np.clip(T, T_MIN + 1e-8, T_MAX)
     omega_motors = np.sqrt(T / K_ETA)
     return np.clip(omega_motors, OMEGA_MIN, OMEGA_MAX)
