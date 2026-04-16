@@ -215,14 +215,14 @@ draw_panel(
 )
 
 # ── Shared caption-style annotation ───────────────────────────────────────────
-fig.text(
-    0.5, -0.04,
-    'Ablation Study — Residual Acceleration Prediction RMSE (m/s²)\n'
-    'Bars: X (blue) / Y (green) / Z (amber) / Mean (pink). '
-    'Filled = Full model; hatched = ablation variant.',
-    ha='center', fontsize=7, color='#444444',
-    style='italic'
-)
+# fig.text(
+#     0.5, -0.04,
+#     'Ablation Study — Residual Acceleration Prediction RMSE (m/s²)\n'
+#     'Bars: X (blue) / Y (green) / Z (amber) / Mean (pink). '
+#     'Filled = Full model; hatched = ablation variant.',
+#     ha='center', fontsize=7, color='#444444',
+#     style='italic'
+# )
 
 plt.tight_layout(rect=[0, 0.00, 1, 1])
 

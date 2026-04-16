@@ -61,7 +61,7 @@ The environment is configured with the following physical constants:
 
   * `mppi_pinn_mujoco.py`: Main entry point for simulation and visualization.
   * `quadrotor_env.py`: MuJoCo environment wrapper handling physics and state.
-  * `controllers/pinn_mppi_GPU.py`: GPU-accelerated MPPI algorithm implementation.
+  * `controllers/pinn_mppi_v2.py`: GPU-accelerated MPPI algorithm implementation.
   * `models/pinn.py`: Architecture for the Residual PINN.
 
 ## ⌨️ Controls

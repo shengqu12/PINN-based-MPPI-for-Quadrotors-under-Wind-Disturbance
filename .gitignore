@@ -1,6 +1,10 @@
-simulation/mujoco_menagerie
+test.py
+notes
+results
+experiment_notes.xlsx
 
-ablation_29k_run.log
-ablation_const_lam.log
-
+checkpoints/*
+data/*
 .claude
+
+
