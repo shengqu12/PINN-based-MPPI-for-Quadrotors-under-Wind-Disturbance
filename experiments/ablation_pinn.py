@@ -1,15 +1,17 @@
 """
-ablation_pinn.py — Ablation study: does the C4v symmetry loss help?
+ablation_pinn.py — Ablation study: symmetry loss and cyclical annealing.
 
-Two variants answer one question:
+Three variants answer two questions:
 
-  Q: Does the C4v symmetry loss improve OOD generalisation?
-      full   : PINN (EDC + rotor) + constant lambda_sym
-      no_sym : PINN (EDC + rotor), regression only (lambda_sym = 0)
+  Q1: Does the C4v symmetry loss improve OOD generalisation?
+      cyclic_sym : PINN + cyclical-annealed lambda_sym  (full model, matches train.py)
+      no_sym     : PINN, regression only (lambda_sym = 0)
 
-Both use the same ResidualPINN architecture (29K params).
-No cyclical annealing — lambda_sym is held constant throughout training.
+  Q2: Does cyclical annealing help vs constant lambda_sym?
+      cyclic_sym : cyclical annealing (lambda oscillates 0 → 0.1 → 0 ...)
+      full       : constant lambda_sym = 0.1 throughout training
 
+All three use the same ResidualPINN architecture.
 Normalizer: std_omx == std_omy enforced via symmetrize_xy().
 
 Outputs:
@@ -25,7 +27,7 @@ import numpy as np
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from training.dataset import make_dataloaders
-from training.losses import loss_regression, total_loss
+from training.losses import loss_regression, total_loss, get_lambda_sym
 from models.pinn import ResidualPINN
 
 BASE_DIR = os.path.join(os.path.dirname(__file__), '..')
@@ -35,19 +37,33 @@ CKPT_DIR = os.path.join(BASE_DIR, 'checkpoints')
 
 # ── Variant definitions ──────────────────────────────────────────────────────
 #
-# lambda_sym > 0 enables the C4v symmetry loss (constant throughout training).
-# Both variants use ResidualPINN — only the symmetry loss is toggled.
+# cyclic_sym : cyclical annealing (matches train.py) — the full proposed model
+# full       : constant lambda_sym = 0.1 — ablates the annealing schedule
+# no_sym     : lambda_sym = 0 — ablates the symmetry loss entirely
+#
+# 'cyclic' key triggers get_lambda_sym(); absent or False → constant lambda.
 
 VARIANTS = {
+    'cyclic_sym': {
+        'description': 'PINN + cyclic annealing (ours)',
+        'lambda_sym':  0.1,   # lambda_max for annealing
+        'cyclic':      True,
+        'n_cycles':    5,
+        'R':           0.5,
+        'epochs':      300,
+        'patience':    40,
+    },
     'full': {
-        'description': 'Full PINN (EDC + C4v sym)',
+        'description': 'PINN + constant lambda_sym',
         'lambda_sym':  0.1,
+        'cyclic':      False,
         'epochs':      300,
         'patience':    40,
     },
     'no_sym': {
         'description': 'PINN w/o symmetry loss',
         'lambda_sym':  0.0,
+        'cyclic':      False,
         'epochs':      300,
         'patience':    40,
     },
@@ -79,11 +95,14 @@ def evaluate(model, loader, norm_mean, norm_std, device):
 # ── Single variant training ──────────────────────────────────────────────────
 
 def train_variant(name, cfg, device):
-    lambda_sym = cfg['lambda_sym']
+    lambda_max = cfg['lambda_sym']
+    use_cyclic = cfg.get('cyclic', False)
+    anneal_str = f"cyclic (max={lambda_max}, n_cycles={cfg.get('n_cycles',5)}, R={cfg.get('R',0.5)})" \
+                 if use_cyclic else f"constant={lambda_max}"
     print(f"\n{'='*60}")
     print(f"Variant : {name}  ({cfg['description']})")
     print(f"  model      = ResidualPINN")
-    print(f"  lambda_sym = {lambda_sym}  (constant)")
+    print(f"  lambda_sym = {anneal_str}")
     print(f"{'='*60}")
 
     torch.manual_seed(SEED)
@@ -114,6 +133,18 @@ def train_variant(name, cfg, device):
 
     for epoch in range(1, cfg['epochs'] + 1):
 
+        # Determine effective lambda_sym for this epoch
+        if use_cyclic:
+            lam = get_lambda_sym(
+                epoch,
+                total_epochs=cfg['epochs'],
+                lambda_max=lambda_max,
+                n_cycles=cfg.get('n_cycles', 5),
+                R=cfg.get('R', 0.5),
+            )
+        else:
+            lam = lambda_max
+
         model.train()
         total_loss_sum = 0.0
         nb             = 0
@@ -125,12 +156,12 @@ def train_variant(name, cfg, device):
             v_rel = X[:, 0:3] * norm_std[0:3] + norm_mean[0:3]
             pred  = model(X, v_rel)
 
-            if lambda_sym > 0:
+            if lam > 0:
                 loss, _ = total_loss(
                     pred=pred, target=y,
                     model=model, X_batch=X,
                     norm_mean=norm_mean, norm_std=norm_std,
-                    lambda_sym=lambda_sym,
+                    lambda_sym=lam,
                 )
             else:
                 loss = loss_regression(pred, y)
@@ -152,7 +183,7 @@ def train_variant(name, cfg, device):
 
         if epoch <= 3 or epoch % 50 == 0:
             print(f"  Epoch {epoch:3d} | "
-                  f"loss={avg:.4f} lam={lambda_sym:.4f} | "
+                  f"loss={avg:.4f} lam={lam:.4f} | "
                   f"val=[{val_rmse[0]:.3f},{val_rmse[1]:.3f},{val_rmse[2]:.3f}] | "
                   f"ood=[{ood_rmse[0]:.3f},{ood_rmse[1]:.3f},{ood_rmse[2]:.3f}]")
 
@@ -218,12 +249,18 @@ def print_table(results):
         )
     print(sep)
     print("\nAblation analysis:")
-    full   = next((r for r in results if r['name'] == 'full'),   None)
-    no_sym = next((r for r in results if r['name'] == 'no_sym'), None)
-    if full and no_sym:
-        delta = no_sym['ood_mean'] - full['ood_mean']
-        sign  = 'sym helps (+OOD)' if delta > 0 else 'sym hurts (-OOD)'
-        print(f"  C4v sym effect (OOD mean): {delta:+.3f} m/s^2  [{sign}]")
+    cyclic = next((r for r in results if r['name'] == 'cyclic_sym'), None)
+    full   = next((r for r in results if r['name'] == 'full'),       None)
+    no_sym = next((r for r in results if r['name'] == 'no_sym'),     None)
+
+    if cyclic and no_sym:
+        delta = no_sym['ood_mean'] - cyclic['ood_mean']
+        sign  = 'sym helps' if delta > 0 else 'sym hurts'
+        print(f"  Q1 — C4v sym effect       (OOD mean): {delta:+.3f} m/s^2  [{sign}]")
+    if cyclic and full:
+        delta = full['ood_mean'] - cyclic['ood_mean']
+        sign  = 'cyclic helps' if delta > 0 else 'cyclic hurts'
+        print(f"  Q2 — cyclic vs constant   (OOD mean): {delta:+.3f} m/s^2  [{sign}]")
 
 
 # ── Main ──────────────────────────────────────────────────────────────

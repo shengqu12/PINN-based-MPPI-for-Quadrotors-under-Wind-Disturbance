@@ -2,8 +2,8 @@ test.py
 notes
 experiment_notes.xlsx
 
-checkpoints/*
-data/*
+checkpoints/
+data/
 .claude
 
-results
+results/

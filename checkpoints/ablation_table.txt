@@ -4,5 +4,6 @@ OOD: wind 10-15 m/s (outside training distribution)
 
 Method                           |  Val x  Val y  Val z  Val M |  OOD x  OOD y  OOD z  OOD M
 ---------------------------------------------------------------------------------------------
-Full PINN (EDC + C4v sym)        |  0.013  0.015  0.040  0.023 |  6.104  6.170  3.339  5.204
-PINN w/o symmetry loss           |  0.010  0.010  0.030  0.017 | 10.435  9.853  1.584  7.291
+PINN + cyclic annealing (ours)   |  0.012  0.014  0.040  0.022 |  5.591  5.963  1.358  4.304
+PINN + constant lambda_sym       |  0.014  0.016  0.041  0.024 |  7.198  6.694  2.620  5.504
+PINN w/o symmetry loss           |  0.009  0.010  0.029  0.016 | 10.710  9.893  2.655  7.753

@@ -351,9 +351,6 @@ def plot_minarik(res_a, ref_a, obs_a, margin_a,
                loc='lower center', ncol=4, fontsize=8.5,
                framealpha=0.95, bbox_to_anchor=(0.5, -0.02))
 
-    fig.suptitle(
-        f'PINN-MPPI Obstacle Avoidance  (wind = {wind_mag:.0f} m/s)',
-        fontsize=11, fontweight='bold', y=1.02)
 
     plt.tight_layout(rect=[0, 0.06, 1, 1])
     fig.savefig(save_path, dpi=180, bbox_inches='tight')

@@ -10,10 +10,10 @@ Test 1: Wind direction generalization (hover, 8 m/s).
     The 45° diagonal is the only truly unseen direction.
 
 Test 2: Trajectory generalization (X-wind 8 m/s).
-    Hover/Circle were used in training. Lissajous-vertical and larger/smaller
-    circles test same-family and out-of-family generalization.
+    Hover/Circle/Lissajous were used in training.
+    Lemniscate and Spiral are unseen trajectories.
 
-Test 3: OOD wind speed on Lissajous figure-8.
+Test 3: OOD wind speed on Lemniscate (unseen trajectory).
 """
 
 import numpy as np
@@ -27,6 +27,7 @@ from controllers.pinn_mppi_v2 import (
 )
 from rotorpy.trajectories.circular_traj import ThreeDCircularTraj
 from rotorpy.trajectories.hover_traj import HoverTraj
+from rotorpy.trajectories.lissajous_traj import TwoDLissajous
 
 CKPT_DIR   = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
 RESULT_DIR = os.path.join(os.path.dirname(__file__), '..', 'results')
@@ -35,36 +36,43 @@ MPPI_K = 896
 MPPI_H = 15
 
 
-# ── Lissajous figure-8 trajectory (vertical orientation) ──────────────────────
+# ── Unseen trajectory definitions ─────────────────────────────────────────────
 
-class LissajousVerticalTraj:
-    """
-    Vertical-orientation Lissajous (1:2 frequency ratio):
-        x(t) = Ax * sin(wx * t)
-        y(t) = Ay * sin(2*wx * t + phi)
-    """
-    def __init__(self, center=np.array([0., 0., 1.5]),
-                 Ax=1.5, Ay=1.5, freq_x=0.15):
-        self.cx, self.cy, self.cz = center
-        self.Ax = Ax;  self.Ay = Ay
-        self.wx = 2 * np.pi * freq_x
-        self.wy = 2 * self.wx
-        self.phi = np.pi / 2
+def make_lemniscate(scale=1.5, period=10.0):
+    class _T:
+        def update(self, t):
+            w   = 2 * np.pi / period;  s = w * t;  d = 1 + np.sin(s) ** 2
+            x   = scale * np.cos(s) / d
+            y   = scale * np.sin(s) * np.cos(s) / d
+            eps = 1e-4;  d2 = 1 + np.sin(s + eps * w) ** 2
+            x2  = scale * np.cos(s + eps * w) / d2
+            y2  = scale * np.sin(s + eps * w) * np.cos(s + eps * w) / d2
+            dx  = (x2 - x) / eps;  dy = (y2 - y) / eps
+            return {
+                'x': np.array([x, y, 1.5]),
+                'x_dot': np.array([dx, dy, 0.]),
+                'x_ddot': np.zeros(3),
+                'x_dddot': np.zeros(3), 'x_ddddot': np.zeros(3),
+                'yaw': 0., 'yaw_dot': 0.,
+            }
+    return _T()
 
-    def update(self, t):
-        x  = self.cx + self.Ax * np.sin(self.wx * t)
-        y  = self.cy + self.Ay * np.sin(self.wy * t + self.phi)
-        vx = self.Ax * self.wx * np.cos(self.wx * t)
-        vy = self.Ay * self.wy * np.cos(self.wy * t + self.phi)
-        ax = -self.Ax * self.wx**2 * np.sin(self.wx * t)
-        ay = -self.Ay * self.wy**2 * np.sin(self.wy * t + self.phi)
-        return {
-            'x':       np.array([x, y, self.cz]),
-            'x_dot':   np.array([vx, vy, 0.]),
-            'x_ddot':  np.array([ax, ay, 0.]),
-            'x_dddot': np.zeros(3), 'x_ddddot': np.zeros(3),
-            'yaw': 0., 'yaw_dot': 0.,
-        }
+
+def make_spiral(radius=1.5, height=1.0, period=10.0):
+    class _T:
+        def update(self, t):
+            w  = 2 * np.pi / period;  f = min(t / period, 1.0)
+            x  = radius * np.cos(w * t);  y = radius * np.sin(w * t)
+            z  = 1.5 + height * f
+            dx = -radius * w * np.sin(w * t);  dy = radius * w * np.cos(w * t)
+            return {
+                'x': np.array([x, y, z]),
+                'x_dot': np.array([dx, dy, height / period]),
+                'x_ddot': np.zeros(3),
+                'x_dddot': np.zeros(3), 'x_ddddot': np.zeros(3),
+                'yaw': 0., 'yaw_dot': 0.,
+            }
+    return _T()
 
 
 # ── thin wrapper ───────────────────────────────────────────────────────────────
@@ -122,27 +130,19 @@ def main():
 
     wind_x = np.array([speed, 0., 0.])
     traj_configs = {
-        'Hover (train)':          (lambda: HoverTraj(x0=np.array([0., 0., 1.5])),
-                                   'train'),
-        'Circle r=1.5 (train)':   (lambda: ThreeDCircularTraj(
-                                       center=np.array([0., 0., 1.5]),
-                                       radius=np.array([1.5, 1.5, 0.]),
-                                       freq=np.array([0.2, 0.2, 0.])),
-                                   'train'),
-        'Lissajous-V (unseen)':   (lambda: LissajousVerticalTraj(
-                                       center=np.array([0., 0., 1.5]),
-                                       Ax=1.5, Ay=1.5, freq_x=0.15),
-                                   'unseen'),
-        'Circle r=0.5 (unseen)':  (lambda: ThreeDCircularTraj(
-                                       center=np.array([0., 0., 1.5]),
-                                       radius=np.array([0.5, 0.5, 0.]),
-                                       freq=np.array([0.3, 0.3, 0.])),
-                                   'unseen'),
-        'Circle r=3.0 (unseen)':  (lambda: ThreeDCircularTraj(
-                                       center=np.array([0., 0., 1.5]),
-                                       radius=np.array([3.0, 3.0, 0.]),
-                                       freq=np.array([0.1, 0.1, 0.])),
-                                   'unseen'),
+        'Lissajous (train)':    (lambda: TwoDLissajous(
+                                     A=1.5, B=1.5, a=1, b=2,
+                                     delta=1.5708, height=1.5),
+                                 'train'),
+        'Circle r=1.5 (train)': (lambda: ThreeDCircularTraj(
+                                     center=np.array([0., 0., 1.5]),
+                                     radius=np.array([1.5, 1.5, 0.]),
+                                     freq=np.array([0.2, 0.2, 0.])),
+                                 'train'),
+        'Lemniscate (unseen)':  (lambda: make_lemniscate(scale=1.5, period=10.0),
+                                 'unseen'),
+        'Spiral (unseen)':      (lambda: make_spiral(radius=1.5, height=1.0, period=10.0),
+                                 'unseen'),
     }
 
     print(f"\n{'Trajectory':>24} | {'Cat':>6} | {'Nominal':>8} | "
@@ -159,13 +159,12 @@ def main():
               f"{e_pinn:10.4f} | {improv:+7.1f}% {tag}")
         traj_results[tname] = {'nom': e_nom, 'pinn': e_pinn, 'type': ttype}
 
-    # ── Test 3: OOD wind speed on Lissajous ───────────────────────────────────
+    # ── Test 3: OOD wind speed on Lemniscate ──────────────────────────────────
     print("\n" + "=" * 62)
-    print("Test 3: OOD Wind Speed on Lissajous Figure-8")
+    print("Test 3: OOD Wind Speed on Lemniscate (unseen trajectory)")
     print("=" * 62)
 
-    traj_eight = lambda: LissajousVerticalTraj(
-        center=np.array([0., 0., 1.5]), Ax=1.5, Ay=1.5, freq_x=0.15)
+    traj_lemn = lambda: make_lemniscate(scale=1.5, period=10.0)
 
     print(f"\n{'Wind':>6} | {'Split':>5} | {'Nominal':>8} | "
           f"{'PINN-MPPI':>10} | {'Improve':>8}")
@@ -174,8 +173,8 @@ def main():
     ood_results = {}
     for ws, label in [(8., 'train'), (10., 'OOD'), (12., 'OOD')]:
         wv     = np.array([ws, 0., 0.])
-        e_nom  = run_ep(model, normalizer, wv, traj_eight, use_pinn=False)
-        e_pinn = run_ep(model, normalizer, wv, traj_eight, use_pinn=True)
+        e_nom  = run_ep(model, normalizer, wv, traj_lemn, use_pinn=False)
+        e_pinn = run_ep(model, normalizer, wv, traj_lemn, use_pinn=True)
         improv = (e_nom - e_pinn) / (e_nom + 1e-9) * 100
         tag    = '✓' if improv > 0 else '✗'
         print(f"{ws:6.0f} | {label:>5} | {e_nom:8.4f} | "
@@ -183,15 +182,14 @@ def main():
         ood_results[ws] = {'nom': e_nom, 'pinn': e_pinn}
 
     # ── save ──────────────────────────────────────────────────────────────────
-    import numpy as np_
     all_results = {
-        'wind_dir':   wind_results,
-        'trajectory': traj_results,
-        'ood_wind':   ood_results,
+        'wind_dir':    wind_results,
+        'trajectory':  traj_results,
+        'ood_wind':    ood_results,
         'mppi_params': {'K': MPPI_K, 'H': MPPI_H},
     }
-    np_.save(os.path.join(RESULT_DIR, 'generalization.npy'),
-             all_results, allow_pickle=True)
+    np.save(os.path.join(RESULT_DIR, 'generalization.npy'),
+            all_results, allow_pickle=True)
 
     # ── plot ──────────────────────────────────────────────────────────────────
     try:
@@ -199,11 +197,6 @@ def main():
         import matplotlib.pyplot as plt
 
         fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-        fig.suptitle(
-            f'Generalization Test  (K={MPPI_K}, H={MPPI_H})\n'
-            'Nominal MPPI (SE3, no PINN)  vs  PINN-MPPI (SE3 + PINN feedforward)',
-            fontsize=10, fontweight='bold',
-        )
         C_NOM  = '#5B9BD5'
         C_PINN = '#FFC000'
 
@@ -241,7 +234,8 @@ def main():
         ax.bar(x - 0.2, noms,  0.4, label='Nominal MPPI', color=C_NOM,  alpha=0.85)
         ax.bar(x + 0.2, pinns, 0.4, label='PINN-MPPI',    color=C_PINN, alpha=0.85)
         ax.set_xticks(x)
-        ax.set_xticklabels(['Hover', 'Circle\nr=1.5', 'Lissajous', 'Circle\nr=0.5', 'Circle\nr=3.0'],
+        ax.set_xticklabels(['Lissajous\n(train)', 'Circle\n(train)',
+                            'Lemnis-\ncate', 'Spiral'],
                            fontsize=8)
         ax.set_ylabel('Mean Error (m)'); ax.set_xlabel('Trajectory')
         ax.set_title('Trajectory Generalization\n(X-wind 8 m/s)')
@@ -260,7 +254,7 @@ def main():
         ax.set_xticklabels([f'{ws:.0f} m/s\n({"train" if ws == 8 else "OOD"})'
                             for ws in ws_list], fontsize=9)
         ax.set_ylabel('Mean Error (m)'); ax.set_xlabel('Wind Speed')
-        ax.set_title('OOD Wind Speed\n(Lissajous figure-8)')
+        ax.set_title('OOD Wind Speed\n(Lemniscate, unseen)')
         ax.legend(fontsize=8); ax.grid(True, alpha=0.3, axis='y')
         add_improv_labels(ax, x, noms, pinns)
 

@@ -249,9 +249,6 @@ _error_box(ax, [f'SE3:   {_rmse(pos_se3_obs,   ref_obs)}',
                 f'PINN:  {_rmse(pos_pinn_obs,  ref_obs)}',
                 f'Avoid: {_rmse(pos_avoid_obs, ref_obs)}'])
 
-# ── Suptitle ──────────────────────────────────────────────────────────────────
-fig.suptitle('Trajectory Tracking and Obstacle Avoidance under Wind Disturbance',
-             fontsize=10, fontweight='bold', y=1.02)
 
 # ── Save ──────────────────────────────────────────────────────────────────────
 os.makedirs(os.path.dirname(OUT), exist_ok=True)

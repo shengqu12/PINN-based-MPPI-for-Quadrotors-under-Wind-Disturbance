@@ -110,8 +110,8 @@ draw_panel(ax_ood, ood_x, ood_y, ood_z, ood_mean,
            'Out-of-Distribution RMSE\n(wind 10–15 m/s)', 'b')
 
 # ── Shared suptitle ───────────────────────────────────────────────────────────
-fig.suptitle('Ablation Study: Effect of C4v Symmetry Constraint',
-             fontsize=10, fontweight='bold', y=1.03)
+# fig.suptitle('Ablation Study: Effect of C4v Symmetry Constraint',
+#              fontsize=10, fontweight='bold', y=1.03)
 
 # ── Shared legend below (matching fig3 style) ─────────────────────────────────
 axis_handles = [

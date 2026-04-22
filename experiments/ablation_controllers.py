@@ -217,8 +217,8 @@ def plot_results(all_res, path):
         fig, axes = plt.subplots(nt, 2, figsize=(14, 4*nt))
         if nt == 1:
             axes = [axes]
-        fig.suptitle('Controller Comparison: SE3 vs Nominal-MPPI vs PINN-MPPI v2',
-                     fontsize=11)
+        # fig.suptitle('Controller Comparison: SE3 vs Nominal-MPPI vs PINN-MPPI v2',
+        #              fontsize=11)
 
         C = {'SE3': 'steelblue', 'Nom-MPPI': 'mediumpurple',
              'PINN-MPPI': 'darkorange'}
